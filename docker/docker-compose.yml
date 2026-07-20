@@ -1,0 +1,50 @@
+# =============================================================================
+# Ardee RAG ChatBot — Development Docker Compose
+# =============================================================================
+# Usage:
+#   docker compose -f docker/docker-compose.yml up -d
+#
+# This file starts all infrastructure dependencies for local development.
+# The backend app itself runs outside Docker during development for hot reload.
+# =============================================================================
+
+services:
+  # ── PostgreSQL + pgvector ──────────────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ardee-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ardee_rag
+      POSTGRES_USER: ardee
+      POSTGRES_PASSWORD: changeme_in_production
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ardee -d ardee_rag"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: ardee-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
