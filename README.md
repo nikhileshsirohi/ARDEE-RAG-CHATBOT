@@ -48,7 +48,7 @@ A production-grade Retrieval-Augmented Generation (RAG) chatbot with authenticat
 
 ```bash
 # 1. Clone the repository
-git clone <repo-url>
+git clone https://github.com/nikhileshsirohi/ARDEE-RAG-CHATBOT.git
 cd Ardee-RAG-ChatBot
 
 # 2. Install dependencies (creates venv automatically)
