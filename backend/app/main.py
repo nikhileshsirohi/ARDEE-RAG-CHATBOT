@@ -21,6 +21,7 @@ from app.core.database import close_db, init_db
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import get_logger, setup_logging
 from app.core.redis import close_redis, init_redis
+from app.middleware.metrics import RequestMetricsMiddleware
 
 logger = get_logger(__name__)
 
@@ -81,6 +82,7 @@ def create_app() -> FastAPI:
     )
 
     # ── Middleware ────────────────────────────────────────────────────────────
+    app.add_middleware(RequestMetricsMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins_list,
