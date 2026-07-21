@@ -19,6 +19,12 @@ class RagDocumentCreate(BaseModel):
     checksum_sha256: str = Field(..., min_length=64, max_length=64)
 
 
+class RagDocumentUpdate(BaseModel):
+    """Admin request body for updating document metadata."""
+
+    title: str = Field(..., min_length=1, max_length=255)
+
+
 class RagDocumentResponse(BaseModel):
     """Admin-facing document response."""
 

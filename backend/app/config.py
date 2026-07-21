@@ -103,6 +103,31 @@ class Settings(BaseSettings):
     allowed_extensions: str = Field(
         default=".pdf", description="Comma-separated allowed extensions"
     )
+    upload_dir: str = Field(
+        default="storage/uploads/rag", description="Local directory for uploaded RAG PDFs"
+    )
+
+    @property
+    def allowed_extensions_list(self) -> list[str]:
+        """Parse allowed upload extensions into lowercase values."""
+        return [
+            extension.strip().lower()
+            for extension in self.allowed_extensions.split(",")
+            if extension.strip()
+        ]
+
+    @property
+    def max_upload_size_bytes(self) -> int:
+        """Return max upload size in bytes."""
+        return self.max_upload_size_mb * 1024 * 1024
+
+    @property
+    def upload_dir_path(self) -> Path:
+        """Resolve upload directory relative to the backend root when needed."""
+        upload_path = Path(self.upload_dir)
+        if upload_path.is_absolute():
+            return upload_path
+        return Path(__file__).resolve().parents[1] / upload_path
 
     # ── Semantic Cache ───────────────────────────────────────────────────────
     semantic_cache_threshold: float = Field(

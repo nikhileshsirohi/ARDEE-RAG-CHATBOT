@@ -62,6 +62,13 @@ class ConflictError(AppError):
         super().__init__(message=message, status_code=status.HTTP_409_CONFLICT)
 
 
+class BadRequestError(AppError):
+    """Invalid request (400)."""
+
+    def __init__(self, message: str = "Bad request") -> None:
+        super().__init__(message=message, status_code=status.HTTP_400_BAD_REQUEST)
+
+
 class RateLimitError(AppError):
     """Rate limit exceeded (429)."""
 
