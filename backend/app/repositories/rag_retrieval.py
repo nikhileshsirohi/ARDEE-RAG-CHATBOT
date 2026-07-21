@@ -17,6 +17,7 @@ class HybridSearchResult:
     original_filename: str
     page_number: int | None
     content: str
+    token_count: int
     vector_score: float
     keyword_score: float
     hybrid_score: float
@@ -54,6 +55,7 @@ class RagRetrievalRepository:
                     rd.original_filename,
                     dc.page_number,
                     dc.content,
+                    dc.token_count,
                     1 - (dc.embedding <=> query.embedding) AS vector_score,
                     0.0 AS keyword_score,
                     row_number() OVER (ORDER BY dc.embedding <=> query.embedding) AS vector_rank,
@@ -74,6 +76,7 @@ class RagRetrievalRepository:
                     rd.original_filename,
                     dc.page_number,
                     dc.content,
+                    dc.token_count,
                     0.0 AS vector_score,
                     ts_rank_cd(dc.search_vector, query.ts_query) AS keyword_score,
                     NULL::bigint AS vector_rank,
@@ -101,6 +104,7 @@ class RagRetrievalRepository:
                 original_filename,
                 page_number,
                 content,
+                token_count,
                 max(vector_score) AS vector_score,
                 max(keyword_score) AS keyword_score,
                 max(
@@ -114,7 +118,8 @@ class RagRetrievalRepository:
                 document_title,
                 original_filename,
                 page_number,
-                content
+                content,
+                token_count
             ORDER BY hybrid_score DESC, vector_score DESC, keyword_score DESC
             LIMIT :limit
             """
@@ -138,6 +143,7 @@ class RagRetrievalRepository:
                 original_filename=row["original_filename"],
                 page_number=row["page_number"],
                 content=row["content"],
+                token_count=row["token_count"],
                 vector_score=float(row["vector_score"] or 0),
                 keyword_score=float(row["keyword_score"] or 0),
                 hybrid_score=float(row["hybrid_score"] or 0),

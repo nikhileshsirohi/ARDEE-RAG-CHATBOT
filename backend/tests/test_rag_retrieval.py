@@ -37,6 +37,7 @@ class FakeRetrievalRepository:
                 original_filename="policy.pdf",
                 page_number=1,
                 content="Policy content",
+                token_count=2,
                 vector_score=0.9,
                 keyword_score=0.2,
                 hybrid_score=0.03,

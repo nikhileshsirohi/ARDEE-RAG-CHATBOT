@@ -50,6 +50,27 @@ class ChatSessionCreate(BaseModel):
     title: str = Field(default="New chat", min_length=1, max_length=255)
 
 
+class ChatAskRequest(BaseModel):
+    """Authenticated request to ask the RAG chatbot."""
+
+    question: str = Field(..., min_length=1, max_length=4000)
+    session_id: uuid.UUID | None = None
+    top_k: int | None = Field(default=None, ge=1, le=20)
+
+
+class ChatAskResponse(BaseModel):
+    """RAG chatbot answer response."""
+
+    session_id: uuid.UUID
+    message_id: uuid.UUID
+    answer: str
+    source_citations: list[dict[str, object]]
+    input_tokens: int = Field(..., ge=0)
+    output_tokens: int = Field(..., ge=0)
+    total_tokens: int = Field(..., ge=0)
+    latency_ms: int = Field(..., ge=0)
+
+
 class ChatSessionResponse(BaseModel):
     """User-facing chat session response."""
 
