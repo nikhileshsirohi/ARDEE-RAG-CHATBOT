@@ -38,6 +38,45 @@ class ChatRepository:
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def list_user_sessions(
+        self,
+        *,
+        user_id: uuid.UUID,
+        limit: int,
+        offset: int,
+    ) -> list[ChatSession]:
+        """List active sessions owned by a user."""
+        stmt: Select[tuple[ChatSession]] = (
+            select(ChatSession)
+            .where(
+                ChatSession.user_id == user_id,
+                ChatSession.is_archived.is_(False),
+            )
+            .order_by(ChatSession.last_message_at.desc().nullslast(), ChatSession.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def list_session_messages(
+        self,
+        *,
+        session_id: uuid.UUID,
+        limit: int,
+        offset: int,
+    ) -> list[ChatMessage]:
+        """List messages for one owned session."""
+        stmt: Select[tuple[ChatMessage]] = (
+            select(ChatMessage)
+            .where(ChatMessage.session_id == session_id)
+            .order_by(ChatMessage.created_at.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
     async def add_message(
         self,
         *,

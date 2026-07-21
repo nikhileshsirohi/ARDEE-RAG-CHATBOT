@@ -127,6 +127,13 @@ class ChatMessageResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ChatSessionDetailResponse(BaseModel):
+    """User-facing chat session with message history."""
+
+    session: ChatSessionResponse
+    messages: list[ChatMessageResponse]
+
+
 class UserTokenUsageMetric(BaseModel):
     """Admin dashboard aggregate by user."""
 

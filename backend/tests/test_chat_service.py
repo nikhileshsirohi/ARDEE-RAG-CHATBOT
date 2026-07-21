@@ -37,6 +37,30 @@ class FakeChatRepository:
             return None
         return chat_session
 
+    async def list_user_sessions(
+        self,
+        *,
+        user_id: uuid.UUID,
+        limit: int,
+        offset: int,
+    ) -> list[ChatSession]:
+        sessions = [
+            session
+            for session in self.sessions.values()
+            if session.user_id == user_id and not session.is_archived
+        ]
+        return sessions[offset : offset + limit]
+
+    async def list_session_messages(
+        self,
+        *,
+        session_id: uuid.UUID,
+        limit: int,
+        offset: int,
+    ) -> list[ChatMessage]:
+        messages = [message for message in self.messages if message.session_id == session_id]
+        return messages[offset : offset + limit]
+
     async def add_message(
         self,
         *,
@@ -173,3 +197,48 @@ def test_chat_ask_route_is_registered() -> None:
     route_paths = set(app.openapi()["paths"].keys())
 
     assert "/api/v1/chat/ask" in route_paths
+    assert "/api/v1/chat/sessions" in route_paths
+    assert "/api/v1/chat/sessions/{session_id}" in route_paths
+
+
+@pytest.mark.anyio
+async def test_fake_chat_repository_lists_only_owned_sessions() -> None:
+    """Session list behavior must be scoped by current user."""
+    repository = FakeChatRepository()
+    owner_id = uuid.uuid4()
+    other_user_id = uuid.uuid4()
+    owned_session = ChatSession(id=uuid.uuid4(), user_id=owner_id, title="Mine")
+    other_session = ChatSession(id=uuid.uuid4(), user_id=other_user_id, title="Other")
+    repository.sessions[owned_session.id] = owned_session
+    repository.sessions[other_session.id] = other_session
+
+    sessions = await repository.list_user_sessions(user_id=owner_id, limit=10, offset=0)
+
+    assert sessions == [owned_session]
+
+
+@pytest.mark.anyio
+async def test_fake_chat_repository_lists_session_messages() -> None:
+    """Session detail behavior should return messages for one session."""
+    repository = FakeChatRepository()
+    session_id = uuid.uuid4()
+    other_session_id = uuid.uuid4()
+    repository.messages = [
+        ChatMessage(
+            id=uuid.uuid4(),
+            session_id=session_id,
+            role=ChatMessageRole.USER,
+            content="Question",
+        ),
+        ChatMessage(
+            id=uuid.uuid4(),
+            session_id=other_session_id,
+            role=ChatMessageRole.USER,
+            content="Other",
+        ),
+    ]
+
+    messages = await repository.list_session_messages(session_id=session_id, limit=10, offset=0)
+
+    assert len(messages) == 1
+    assert messages[0].content == "Question"
