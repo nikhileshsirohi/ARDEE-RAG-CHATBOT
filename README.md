@@ -1,121 +1,175 @@
 # Ardee RAG ChatBot
 
-A production-grade Retrieval-Augmented Generation (RAG) chatbot with authentication, admin panel, hybrid search, semantic cache, chat history, metrics dashboard, and Docker deployment.
+Enterprise RAG chatbot backend built with FastAPI, PostgreSQL + pgvector, Redis, OpenAI, JWT authentication, RBAC, chat history, semantic cache, admin PDF management, metrics, and production middleware.
+
+The backend is implemented. The Next.js frontend/admin dashboard is still pending.
 
 ## Tech Stack
 
 | Layer | Technology |
 |---|---|
-| **Backend** | Python 3.13, FastAPI, Async SQLAlchemy, Alembic |
-| **Frontend** | Next.js, React, TypeScript, TailwindCSS, shadcn/ui |
-| **LLM** | OpenAI GPT-4o via LlamaIndex |
-| **Embeddings** | OpenAI text-embedding-3-small |
-| **Vector DB** | PostgreSQL + pgvector |
-| **Search** | Hybrid (Dense + BM25) |
-| **Cache** | Redis (semantic cache) |
-| **Auth** | JWT (access + refresh tokens), bcrypt, RBAC |
-| **Deployment** | Docker, Docker Compose |
+| Backend | FastAPI, Python 3.13, Async SQLAlchemy |
+| Database | PostgreSQL + pgvector |
+| Cache | Redis |
+| RAG | OpenAI embeddings, GPT model, PDF ingestion |
+| Auth | JWT access tokens, refresh tokens, RBAC |
+| Monitoring | Prometheus-compatible `/api/v1/metrics` |
+| Deployment | Docker, Docker Compose |
+
+## Current Functionality
+
+- User registration and login
+- JWT authentication with refresh tokens
+- Role-based access control: `ADMIN` and `USER`
+- Admin-only PDF upload, update, replace, delete
+- PDF text extraction, chunking, embeddings, and pgvector storage
+- Vector-based RAG retrieval
+- RAG chatbot with user-owned chat sessions
+- Latest K chat history support
+- Low-confidence guard to avoid hallucination
+- Redis semantic cache for similar questions
+- Chat response returns semantic cache hit and similarity score
+- Admin token usage metrics per user
+- Prometheus-compatible HTTP and RAG business metrics
+- Redis-backed rate limiting
+- Request ID correlation using `X-Request-ID`
+- Security headers middleware
+- Docker Compose for backend, PostgreSQL, and Redis
 
 ## Project Structure
 
-```
-├── backend/          # FastAPI application (Clean Architecture)
-│   ├── app/
-│   │   ├── api/          # API routes (versioned)
-│   │   ├── core/         # Cross-cutting concerns
-│   │   ├── models/       # SQLAlchemy ORM models
-│   │   ├── schemas/      # Pydantic request/response schemas
-│   │   ├── services/     # Business logic
-│   │   ├── repositories/ # Data access layer
-│   │   └── middleware/   # Custom middleware
-│   ├── tests/
-│   └── alembic/          # Database migrations
-├── frontend/         # Next.js application
-├── docker/           # Docker configurations
-└── Makefile          # Developer commands
-```
-
-## Quick Start
-
-### Prerequisites
-
-- Python 3.13+
-- [uv](https://docs.astral.sh/uv/) (Python package manager)
-- [pnpm](https://pnpm.io/) (Node.js package manager)
-- Docker & Docker Compose
-
-### Setup
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/nikhileshsirohi/ARDEE-RAG-CHATBOT.git
-cd Ardee-RAG-ChatBot
-
-# 2. Install dependencies (creates venv automatically)
-make dev
-
-# 3. Start infrastructure (PostgreSQL + Redis)
-make docker-up
-
-# 4. Start the backend server
-make run
-
-# 5. Open in browser
-open http://localhost:8000/docs
+```text
+backend/
+  app/
+    api/             # FastAPI routes
+    core/            # config, database, redis, logging, metrics
+    middleware/      # request id, rate limit, security headers, metrics
+    models/          # SQLAlchemy models
+    repositories/    # data access
+    schemas/         # Pydantic schemas
+    services/        # business logic
+  alembic/           # database migrations
+  tests/             # backend tests
+docker/              # Dockerfile and docker-compose
+Makefile             # developer commands
 ```
 
-### Available Commands
+## How To Run
 
-```bash
-make help         # Show all available commands
-make dev          # Install all dependencies + set up pre-commit
-make run          # Start FastAPI dev server
-make test         # Run tests
-make lint         # Run Ruff linter
-make format       # Format code (Black + Ruff)
-make typecheck    # Run mypy
-make check        # Run all quality checks
-make docker-up    # Start PostgreSQL + Redis
-make docker-down  # Stop infrastructure
-make clean        # Remove caches
-```
-
-### Environment Variables
-
-Copy the example file and fill in your values:
+1. Copy env file:
 
 ```bash
 cp .env.example .env
 ```
 
-See [`.env.example`](.env.example) for all available configuration options.
-
-## API Documentation
-
-When running in development mode:
-
-- **Swagger UI**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
-- **OpenAPI JSON**: http://localhost:8000/openapi.json
-
-> API docs are disabled in production for security.
-
-## Development
-
-### Code Quality
-
-This project enforces code quality via pre-commit hooks:
-
-- **Ruff** — Linting + import sorting (replaces flake8, isort)
-- **Black** — Code formatting
-- **mypy** — Static type checking
-
-Hooks run automatically on every commit. Run manually:
+2. Add your OpenAI key in `.env`:
 
 ```bash
-make check
+OPENAI_API_KEY=your-key
 ```
 
-## License
+3. Install backend dependencies:
 
-MIT
+```bash
+cd backend
+uv sync --all-extras
+cd ..
+```
+
+4. Start PostgreSQL and Redis:
+
+```bash
+make docker-up
+```
+
+5. Run migrations:
+
+```bash
+cd backend
+uv run alembic upgrade head
+cd ..
+```
+
+6. Start backend:
+
+```bash
+make run
+```
+
+Open API docs:
+
+```text
+http://localhost:8000/docs
+```
+
+Health check:
+
+```bash
+curl http://localhost:8000/api/v1/health
+```
+
+Metrics:
+
+```bash
+curl http://localhost:8000/api/v1/metrics
+```
+
+## Useful Commands
+
+```bash
+make run          # Run FastAPI backend
+make docker-up    # Start backend dependencies / compose services
+make docker-down  # Stop Docker services
+make test         # Run backend tests
+make lint         # Run Ruff
+make typecheck    # Run mypy
+make check        # Run lint + typecheck
+```
+
+Direct test command:
+
+```bash
+backend/.venv/bin/python -m pytest
+```
+
+## Important API Areas
+
+- `POST /api/v1/auth/register`
+- `POST /api/v1/auth/login`
+- `POST /api/v1/auth/refresh`
+- `POST /api/v1/rag/documents` admin PDF upload
+- `GET /api/v1/rag/documents` admin document list
+- `PATCH /api/v1/rag/documents/{document_id}` admin metadata update
+- `PUT /api/v1/rag/documents/{document_id}/file` admin PDF replace
+- `DELETE /api/v1/rag/documents/{document_id}` admin PDF delete
+- `POST /api/v1/chat/ask` ask chatbot
+- `GET /api/v1/chat/sessions` list user sessions
+- `GET /api/v1/chat/sessions/{session_id}` view session messages
+- `GET /api/v1/admin/metrics/token-usage/users` admin user token metrics
+- `GET /api/v1/metrics` Prometheus metrics
+
+## What Is Pending
+
+- Next.js frontend UI
+- Admin dashboard UI for documents and metrics
+- User chatbot UI with sessions/history
+- Full end-to-end application testing with frontend + backend
+- CI/CD pipeline
+- Production deployment setup
+- TLS/HTTPS through reverse proxy or load balancer
+- Managed PostgreSQL/Redis or hardened infrastructure
+- Backup and restore strategy
+- Prometheus/Grafana deployment and dashboards
+- Log shipping with request ID correlation
+- Load testing for uploads, retrieval, chat, Redis cache, and rate limits
+- Secret rotation and production secret manager integration
+
+## Production Notes
+
+- Do not commit `.env`.
+- Rotate any leaked OpenAI/JWT/Postgres/Redis secrets before production.
+- Set `APP_ENV=production`.
+- Set exact `CORS_ORIGINS` for the deployed frontend.
+- Run `uv run alembic upgrade head` before starting the backend.
+- Use `http://localhost:8000/docs` locally. Do not use `0.0.0.0` in the browser.
+
