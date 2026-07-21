@@ -64,6 +64,34 @@ class ChatSessionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class RagSearchRequest(BaseModel):
+    """Authenticated RAG retrieval request."""
+
+    query: str = Field(..., min_length=1, max_length=4000)
+    top_k: int | None = Field(default=None, ge=1, le=20)
+
+
+class RagSearchResult(BaseModel):
+    """Retrieved chunk with hybrid ranking metadata."""
+
+    chunk_id: uuid.UUID
+    document_id: uuid.UUID
+    document_title: str
+    original_filename: str
+    page_number: int | None
+    content: str
+    vector_score: float
+    keyword_score: float
+    hybrid_score: float
+
+
+class RagSearchResponse(BaseModel):
+    """Authenticated RAG retrieval response."""
+
+    query: str
+    results: list[RagSearchResult]
+
+
 class ChatMessageResponse(BaseModel):
     """User-facing chat message response."""
 
