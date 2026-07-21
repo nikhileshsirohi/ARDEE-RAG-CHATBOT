@@ -6,6 +6,7 @@ Design Decisions:
     - Lifespan context manager handles startup/shutdown events (replaces deprecated on_event).
     - All cross-cutting concerns (CORS, logging, exceptions) are configured here.
     - Routers are mounted, not defined here — keeps this file thin.
+    - Database and Redis connections are initialized at startup and disposed at shutdown.
 """
 
 from collections.abc import AsyncGenerator
@@ -16,8 +17,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1 import v1_router
 from app.config import get_settings
+from app.core.database import close_db, init_db
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import get_logger, setup_logging
+from app.core.redis import close_redis, init_redis
 
 logger = get_logger(__name__)
 
@@ -30,10 +33,9 @@ APP_DESCRIPTION = (
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     """Application lifespan manager.
 
-    Handles startup and shutdown events.
-    Future: Initialize DB connection pool, Redis client, etc.
+    Startup: Initialize logging, database, and Redis connections.
+    Shutdown: Dispose database engine and close Redis client.
     """
-    # ── Startup ──────────────────────────────────────────────────────────────
     settings = get_settings()
     logger.info(
         "Application starting",
@@ -43,10 +45,18 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         debug=settings.app_debug,
     )
 
+    # ── Startup ──────────────────────────────────────────────────────────────
+    await init_db()
+    await init_redis()
+
+    logger.info("All services initialized successfully")
+
     yield
 
     # ── Shutdown ─────────────────────────────────────────────────────────────
-    logger.info("Application shutting down")
+    await close_redis()
+    await close_db()
+    logger.info("Application shut down gracefully")
 
 
 def create_app() -> FastAPI:

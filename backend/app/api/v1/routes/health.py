@@ -7,14 +7,19 @@ Used by:
     - Docker HEALTHCHECK
     - Monitoring dashboards (uptime checks)
 
-Design: Returns minimal info — status, version, environment.
-Future enhancement: Check DB and Redis connectivity for deep health checks.
+Design:
+    - Shallow check (default): Confirms the app process is running.
+    - Deep check (?deep=true): Verifies database and Redis connectivity.
+    - Shallow is fast and cheap — used for high-frequency liveness probes.
+    - Deep is heavier — used for readiness probes before accepting traffic.
 """
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Query, status
 
 from app.config import get_settings
-from app.schemas.health import HealthResponse
+from app.core.database import check_db_health
+from app.core.redis import check_redis_health
+from app.schemas.health import HealthResponse, ServiceHealth
 
 router = APIRouter(tags=["Health"])
 
@@ -24,17 +29,43 @@ router = APIRouter(tags=["Health"])
     response_model=HealthResponse,
     status_code=status.HTTP_200_OK,
     summary="Health Check",
-    description="Returns the current health status, version, and environment of the application.",
+    description=(
+        "Returns the current health status. "
+        "Use ?deep=true to include database and Redis connectivity checks."
+    ),
 )
-async def health_check() -> HealthResponse:
+async def health_check(
+    deep: bool = Query(
+        default=False,
+        description="Include database and Redis connectivity checks",
+    ),
+) -> HealthResponse:
     """Check application health.
 
+    Args:
+        deep: If True, checks database and Redis connectivity.
+
     Returns:
-        HealthResponse with status, version, and environment.
+        HealthResponse with status, version, environment,
+        and optionally database/redis health info.
     """
     settings = get_settings()
-    return HealthResponse(
+
+    response = HealthResponse(
         status="healthy",
         version=settings.app_version,
         environment=settings.app_env,
     )
+
+    if deep:
+        db_health = await check_db_health()
+        redis_health = await check_redis_health()
+
+        response.database = ServiceHealth(**db_health)
+        response.redis = ServiceHealth(**redis_health)
+
+        # Overall status is unhealthy if any dependency is down
+        if db_health.get("status") != "connected" or redis_health.get("status") != "connected":
+            response.status = "unhealthy"
+
+    return response
