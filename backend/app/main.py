@@ -22,6 +22,9 @@ from app.core.exceptions import register_exception_handlers
 from app.core.logging import get_logger, setup_logging
 from app.core.redis import close_redis, init_redis
 from app.middleware.metrics import RequestMetricsMiddleware
+from app.middleware.rate_limit import RateLimitMiddleware
+from app.middleware.request_id import RequestIDMiddleware
+from app.middleware.security_headers import SecurityHeadersMiddleware
 
 logger = get_logger(__name__)
 
@@ -55,6 +58,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     yield
 
     # ── Shutdown ─────────────────────────────────────────────────────────────
+    logger.info("Application shutdown started", status="draining_requests")
     await close_redis()
     await close_db()
     logger.info("Application shut down gracefully")
@@ -82,13 +86,20 @@ def create_app() -> FastAPI:
     )
 
     # ── Middleware ────────────────────────────────────────────────────────────
+    app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(RateLimitMiddleware)
     app.add_middleware(RequestMetricsMiddleware)
+    app.add_middleware(RequestIDMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins_list,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+        if settings.is_production
+        else ["*"],
+        allow_headers=["Authorization", "Content-Type", "X-Request-ID"]
+        if settings.is_production
+        else ["*"],
     )
 
     # ── Exception Handlers ───────────────────────────────────────────────────

@@ -42,6 +42,9 @@ class FakeRepository:
         document.error_message = error_message
         return document
 
+    async def get_document_chunk_metrics(self) -> tuple[int, int]:
+        return 1, len(self.saved_chunks)
+
 
 class FakeExtractor:
     """Return preconfigured extracted pages."""

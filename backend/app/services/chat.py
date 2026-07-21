@@ -13,6 +13,7 @@ from openai.types.chat import (
 
 from app.config import Settings
 from app.core.exceptions import NotFoundError
+from app.core.metrics import metrics_registry
 from app.models.rag import ChatMessage, ChatMessageRole, ChatSession
 from app.models.user import User
 from app.repositories.chat import ChatRepository
@@ -76,11 +77,22 @@ class OpenAIChatAnswerService:
             context=context,
             chat_history=chat_history,
         )
-        response = await self.client.chat.completions.create(
-            model=self.settings.openai_model,
-            messages=messages,
-            temperature=0.2,
-        )
+        started_at = time.monotonic()
+        metrics_registry.increment_counter("llm_calls_total")
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.settings.openai_model,
+                messages=messages,
+                temperature=0.2,
+            )
+        except Exception:
+            metrics_registry.increment_counter("llm_errors_total")
+            raise
+        finally:
+            metrics_registry.observe_histogram(
+                "llm_call_duration_seconds",
+                time.monotonic() - started_at,
+            )
 
         answer = response.choices[0].message.content or ""
         usage = response.usage
@@ -168,27 +180,108 @@ class ChatService:
     ) -> ChatAnswer:
         """Ask the RAG chatbot and persist the conversation."""
         started_at = time.monotonic()
+        metrics_registry.increment_counter("rag_queries_total")
         normalized_question = " ".join(question.split())
-        chat_session = await self._get_or_create_session(
-            user=user,
-            session_id=session_id,
-            question=normalized_question,
-        )
-        query_embedding = await self.retrieval_service.embed_query(normalized_question)
-        cache_hit = await self._get_semantic_cache_hit(query_embedding=query_embedding)
+        try:
+            chat_session = await self._get_or_create_session(
+                user=user,
+                session_id=session_id,
+                question=normalized_question,
+            )
+            query_embedding = await self.retrieval_service.embed_query(normalized_question)
+            cache_hit = await self._get_semantic_cache_hit(query_embedding=query_embedding)
 
-        if cache_hit is not None:
+            if cache_hit is not None:
+                metrics_registry.increment_counter("rag_cache_hits_total")
+                await self.chat_repository.add_message(
+                    session=chat_session,
+                    role=ChatMessageRole.USER,
+                    content=normalized_question,
+                )
+                latency_ms = round((time.monotonic() - started_at) * 1000)
+                assistant_message = await self.chat_repository.add_message(
+                    session=chat_session,
+                    role=ChatMessageRole.ASSISTANT,
+                    content=cache_hit.answer,
+                    source_citations=cache_hit.source_citations,
+                    latency_ms=latency_ms,
+                )
+                embedding_tokens = len(normalized_question.split())
+                await self.chat_repository.record_token_usage(
+                    user_id=user.id,
+                    session_id=chat_session.id,
+                    message_id=assistant_message.id,
+                    model_name=self.settings.openai_model,
+                    embedding_model_name=self.settings.openai_embedding_model,
+                    input_tokens=0,
+                    output_tokens=0,
+                    embedding_tokens=embedding_tokens,
+                    request_metadata={
+                        "semantic_cache_hit": True,
+                        "semantic_cache_similarity": cache_hit.similarity,
+                    },
+                )
+                return ChatAnswer(
+                    session_id=chat_session.id,
+                    message_id=assistant_message.id,
+                    answer=cache_hit.answer,
+                    source_citations=cache_hit.source_citations,
+                    input_tokens=0,
+                    output_tokens=0,
+                    total_tokens=embedding_tokens,
+                    latency_ms=latency_ms,
+                    semantic_cache_hit=True,
+                    semantic_cache_similarity=cache_hit.similarity,
+                )
+
+            metrics_registry.increment_counter("rag_cache_misses_total")
+            retrieved_chunks = await self.retrieval_service.search_by_embedding(
+                query_embedding=query_embedding,
+                top_k=top_k,
+            )
+            filtered_chunks = self._filter_retrieved_chunks(retrieved_chunks)
+            is_low_confidence = len(filtered_chunks) == 0
+
+            if is_low_confidence:
+                metrics_registry.increment_counter("rag_low_confidence_total")
+                citations: list[dict[str, object]] = []
+                generated_answer = GeneratedAnswer(
+                    answer=LOW_CONFIDENCE_ANSWER,
+                    input_tokens=0,
+                    output_tokens=0,
+                )
+            else:
+                chat_history = await self.chat_repository.list_recent_session_messages(
+                    session_id=chat_session.id,
+                    limit=self.settings.chat_history_messages_limit,
+                )
+                citations = self._build_citations(filtered_chunks)
+
             await self.chat_repository.add_message(
                 session=chat_session,
                 role=ChatMessageRole.USER,
                 content=normalized_question,
             )
+
+            if not is_low_confidence:
+                generated_answer = await self.answer_service.answer_question(
+                    question=normalized_question,
+                    retrieved_chunks=filtered_chunks,
+                    chat_history=chat_history,
+                )
+                await self._set_semantic_cache(
+                    query=normalized_question,
+                    query_embedding=query_embedding,
+                    generated_answer=generated_answer,
+                    citations=citations,
+                )
             latency_ms = round((time.monotonic() - started_at) * 1000)
+
             assistant_message = await self.chat_repository.add_message(
                 session=chat_session,
                 role=ChatMessageRole.ASSISTANT,
-                content=cache_hit.answer,
-                source_citations=cache_hit.source_citations,
+                content=generated_answer.answer,
+                source_citations=citations,
                 latency_ms=latency_ms,
             )
             embedding_tokens = len(normalized_question.split())
@@ -198,112 +291,41 @@ class ChatService:
                 message_id=assistant_message.id,
                 model_name=self.settings.openai_model,
                 embedding_model_name=self.settings.openai_embedding_model,
-                input_tokens=0,
-                output_tokens=0,
+                input_tokens=generated_answer.input_tokens,
+                output_tokens=generated_answer.output_tokens,
                 embedding_tokens=embedding_tokens,
                 request_metadata={
-                    "semantic_cache_hit": True,
-                    "semantic_cache_similarity": cache_hit.similarity,
+                    "top_k": top_k or self.settings.rag_top_k,
+                    "retrieved_chunks": len(retrieved_chunks),
+                    "retrieved_chunks_after_threshold": len(filtered_chunks),
+                    "low_confidence": is_low_confidence,
+                    "min_vector_score": self.settings.rag_min_vector_score,
+                    "best_hybrid_score": self._best_hybrid_score(retrieved_chunks),
+                    "best_vector_score": self._best_vector_score(retrieved_chunks),
+                    "best_keyword_score": self._best_keyword_score(retrieved_chunks),
+                    "semantic_cache_hit": False,
                 },
             )
+
             return ChatAnswer(
                 session_id=chat_session.id,
                 message_id=assistant_message.id,
-                answer=cache_hit.answer,
-                source_citations=cache_hit.source_citations,
-                input_tokens=0,
-                output_tokens=0,
-                total_tokens=embedding_tokens,
+                answer=generated_answer.answer,
+                source_citations=citations,
+                input_tokens=generated_answer.input_tokens,
+                output_tokens=generated_answer.output_tokens,
+                total_tokens=generated_answer.input_tokens
+                + generated_answer.output_tokens
+                + embedding_tokens,
                 latency_ms=latency_ms,
-                semantic_cache_hit=True,
-                semantic_cache_similarity=cache_hit.similarity,
+                semantic_cache_hit=False,
+                semantic_cache_similarity=None,
             )
-
-        retrieved_chunks = await self.retrieval_service.search_by_embedding(
-            query_embedding=query_embedding,
-            top_k=top_k,
-        )
-        filtered_chunks = self._filter_retrieved_chunks(retrieved_chunks)
-        is_low_confidence = len(filtered_chunks) == 0
-
-        if is_low_confidence:
-            citations: list[dict[str, object]] = []
-            generated_answer = GeneratedAnswer(
-                answer=LOW_CONFIDENCE_ANSWER,
-                input_tokens=0,
-                output_tokens=0,
+        finally:
+            metrics_registry.observe_histogram(
+                "rag_query_duration_seconds",
+                time.monotonic() - started_at,
             )
-        else:
-            chat_history = await self.chat_repository.list_recent_session_messages(
-                session_id=chat_session.id,
-                limit=self.settings.chat_history_messages_limit,
-            )
-            citations = self._build_citations(filtered_chunks)
-
-        await self.chat_repository.add_message(
-            session=chat_session,
-            role=ChatMessageRole.USER,
-            content=normalized_question,
-        )
-
-        if not is_low_confidence:
-            generated_answer = await self.answer_service.answer_question(
-                question=normalized_question,
-                retrieved_chunks=filtered_chunks,
-                chat_history=chat_history,
-            )
-            await self._set_semantic_cache(
-                query=normalized_question,
-                query_embedding=query_embedding,
-                generated_answer=generated_answer,
-                citations=citations,
-            )
-        latency_ms = round((time.monotonic() - started_at) * 1000)
-
-        assistant_message = await self.chat_repository.add_message(
-            session=chat_session,
-            role=ChatMessageRole.ASSISTANT,
-            content=generated_answer.answer,
-            source_citations=citations,
-            latency_ms=latency_ms,
-        )
-        embedding_tokens = len(normalized_question.split())
-        await self.chat_repository.record_token_usage(
-            user_id=user.id,
-            session_id=chat_session.id,
-            message_id=assistant_message.id,
-            model_name=self.settings.openai_model,
-            embedding_model_name=self.settings.openai_embedding_model,
-            input_tokens=generated_answer.input_tokens,
-            output_tokens=generated_answer.output_tokens,
-            embedding_tokens=embedding_tokens,
-            request_metadata={
-                "top_k": top_k or self.settings.rag_top_k,
-                "retrieved_chunks": len(retrieved_chunks),
-                "retrieved_chunks_after_threshold": len(filtered_chunks),
-                "low_confidence": is_low_confidence,
-                "min_vector_score": self.settings.rag_min_vector_score,
-                "best_hybrid_score": self._best_hybrid_score(retrieved_chunks),
-                "best_vector_score": self._best_vector_score(retrieved_chunks),
-                "best_keyword_score": self._best_keyword_score(retrieved_chunks),
-                "semantic_cache_hit": False,
-            },
-        )
-
-        return ChatAnswer(
-            session_id=chat_session.id,
-            message_id=assistant_message.id,
-            answer=generated_answer.answer,
-            source_citations=citations,
-            input_tokens=generated_answer.input_tokens,
-            output_tokens=generated_answer.output_tokens,
-            total_tokens=generated_answer.input_tokens
-            + generated_answer.output_tokens
-            + embedding_tokens,
-            latency_ms=latency_ms,
-            semantic_cache_hit=False,
-            semantic_cache_similarity=None,
-        )
 
     async def _get_or_create_session(
         self,

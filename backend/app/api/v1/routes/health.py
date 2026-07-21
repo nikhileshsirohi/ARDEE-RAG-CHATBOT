@@ -61,8 +61,8 @@ async def health_check(
         db_health = await check_db_health()
         redis_health = await check_redis_health()
 
-        response.database = ServiceHealth(**db_health)
-        response.redis = ServiceHealth(**redis_health)
+        response.database = ServiceHealth.model_validate(db_health)
+        response.redis = ServiceHealth.model_validate(redis_health)
 
         # Overall status is unhealthy if any dependency is down
         if db_health.get("status") != "connected" or redis_health.get("status") != "connected":

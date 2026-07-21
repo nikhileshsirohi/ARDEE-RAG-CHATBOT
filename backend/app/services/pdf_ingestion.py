@@ -1,6 +1,7 @@
 """PDF ingestion services for RAG document chunks."""
 
 import asyncio
+import time
 from dataclasses import dataclass
 
 from llama_index.core.node_parser import SentenceSplitter
@@ -8,6 +9,7 @@ from openai import AsyncOpenAI
 from pypdf import PdfReader
 
 from app.config import Settings
+from app.core.metrics import metrics_registry
 from app.models.rag import DocumentChunk, RagDocument
 from app.repositories.rag_document import RagDocumentRepository
 
@@ -95,11 +97,19 @@ class OpenAIEmbeddingService:
 
         for start in range(0, len(texts), batch_size):
             batch = texts[start : start + batch_size]
-            response = await self.client.embeddings.create(
-                model=self.settings.openai_embedding_model,
-                input=batch,
-                dimensions=self.settings.openai_embedding_dimensions,
-            )
+            started_at = time.monotonic()
+            metrics_registry.increment_counter("embedding_calls_total")
+            try:
+                response = await self.client.embeddings.create(
+                    model=self.settings.openai_embedding_model,
+                    input=batch,
+                    dimensions=self.settings.openai_embedding_dimensions,
+                )
+            finally:
+                metrics_registry.observe_histogram(
+                    "embedding_call_duration_seconds",
+                    time.monotonic() - started_at,
+                )
             embeddings.extend([item.embedding for item in response.data])
 
         return embeddings
@@ -154,10 +164,19 @@ class PdfIngestionService:
                 )
                 for chunk, embedding in zip(text_chunks, embeddings, strict=True)
             ]
-            return await self.repository.complete_ingestion(
+            completed_document = await self.repository.complete_ingestion(
                 document,
                 chunks=document_chunks,
                 page_count=max(page.page_number for page in pages),
             )
+            metrics_registry.increment_counter("rag_documents_ingested_total")
+            await self._record_document_gauges()
+            return completed_document
         except Exception as exc:
+            metrics_registry.increment_counter("rag_ingestion_errors_total")
             return await self.repository.mark_failed(document, error_message=str(exc))
+
+    async def _record_document_gauges(self) -> None:
+        active_documents, total_chunks = await self.repository.get_document_chunk_metrics()
+        metrics_registry.set_gauge("rag_active_documents", active_documents)
+        metrics_registry.set_gauge("rag_total_chunks", total_chunks)

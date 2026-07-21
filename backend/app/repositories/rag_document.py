@@ -3,7 +3,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import Select, delete, select
+from sqlalchemy import Select, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.rag import DocumentChunk, RagDocument, RagDocumentStatus
@@ -120,3 +120,16 @@ class RagDocumentRepository:
         await self.session.flush()
         await self.session.refresh(document)
         return document
+
+    async def get_document_chunk_metrics(self) -> tuple[int, int]:
+        """Return active ready document and chunk totals for gauges."""
+        stmt = select(
+            func.count(RagDocument.id),
+            func.coalesce(func.sum(RagDocument.chunk_count), 0),
+        ).where(
+            RagDocument.deleted_at.is_(None),
+            RagDocument.status == RagDocumentStatus.READY,
+        )
+        result = await self.session.execute(stmt)
+        active_documents, total_chunks = result.one()
+        return int(active_documents), int(total_chunks)

@@ -5,6 +5,7 @@ import uuid
 from fastapi import UploadFile
 
 from app.core.exceptions import NotFoundError
+from app.core.metrics import metrics_registry
 from app.models.rag import RagDocument
 from app.models.user import User
 from app.repositories.rag_document import RagDocumentRepository
@@ -81,9 +82,15 @@ class RagDocumentService:
         document = await self._get_document_or_raise(document_id)
         await self.repository.soft_delete(document)
         await self.storage_service.delete_path(document.storage_path)
+        await self._record_document_gauges()
 
     async def _get_document_or_raise(self, document_id: uuid.UUID) -> RagDocument:
         document = await self.repository.get_active_by_id(document_id)
         if document is None:
             raise NotFoundError("RAG document not found")
         return document
+
+    async def _record_document_gauges(self) -> None:
+        active_documents, total_chunks = await self.repository.get_document_chunk_metrics()
+        metrics_registry.set_gauge("rag_active_documents", active_documents)
+        metrics_registry.set_gauge("rag_total_chunks", total_chunks)

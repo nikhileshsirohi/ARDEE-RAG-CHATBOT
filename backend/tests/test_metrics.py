@@ -53,3 +53,24 @@ def test_metrics_registry_escapes_label_values() -> None:
     output = registry.render_prometheus()
 
     assert 'path="/path/\\"quoted\\""' in output
+
+
+def test_metrics_registry_renders_business_metrics() -> None:
+    """Business counters, gauges, and histograms should render for Prometheus."""
+    registry = MetricsRegistry(latency_buckets=(0.5, float("inf")))
+
+    registry.increment_counter("rag_queries_total")
+    registry.increment_counter("rag_cache_hits_total", 2)
+    registry.set_gauge("rag_active_documents", 3)
+    registry.observe_histogram("rag_query_duration_seconds", 0.75)
+
+    output = registry.render_prometheus()
+
+    assert "# TYPE rag_queries_total counter" in output
+    assert "rag_queries_total 1" in output
+    assert "rag_cache_hits_total 2" in output
+    assert "# TYPE rag_active_documents gauge" in output
+    assert "rag_active_documents 3" in output
+    assert '# TYPE rag_query_duration_seconds histogram' in output
+    assert 'rag_query_duration_seconds_bucket{le="0.5"} 0' in output
+    assert 'rag_query_duration_seconds_bucket{le="+Inf"} 1' in output
