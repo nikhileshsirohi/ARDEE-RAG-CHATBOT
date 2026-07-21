@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter
 
+from app.api.v1.routes.admin_metrics import router as admin_metrics_router
 from app.api.v1.routes.auth import router as auth_router
 from app.api.v1.routes.chat import router as chat_router
 from app.api.v1.routes.health import router as health_router
@@ -16,3 +17,4 @@ v1_router.include_router(auth_router)
 v1_router.include_router(rag_documents_router)
 v1_router.include_router(rag_search_router)
 v1_router.include_router(chat_router)
+v1_router.include_router(admin_metrics_router)
