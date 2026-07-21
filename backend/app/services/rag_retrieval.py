@@ -20,13 +20,17 @@ class RagRetrievalService:
         self.settings = settings
 
     async def search(self, *, query: str, top_k: int | None = None) -> list[HybridSearchResult]:
-        """Embed a query and retrieve the best matching document chunks."""
+        """Embed a query and retrieve the best matching chunks via hybrid search."""
         normalized_query = " ".join(query.split())
         if not normalized_query:
             raise BadRequestError("Search query is required")
 
         query_embedding = await self.embed_query(normalized_query)
-        return await self.search_by_embedding(query_embedding=query_embedding, top_k=top_k)
+        return await self.search_hybrid(
+            query_text=normalized_query,
+            query_embedding=query_embedding,
+            top_k=top_k,
+        )
 
     async def embed_query(self, query: str) -> list[float]:
         """Embed a normalized query."""
@@ -43,9 +47,24 @@ class RagRetrievalService:
         query_embedding: list[float],
         top_k: int | None = None,
     ) -> list[HybridSearchResult]:
-        """Retrieve chunks using an existing query embedding."""
+        """Retrieve chunks using an existing query embedding (vector only)."""
         limit = top_k or self.settings.rag_top_k
         return await self.repository.vector_search(
+            query_embedding=query_embedding,
+            limit=limit,
+        )
+
+    async def search_hybrid(
+        self,
+        *,
+        query_text: str,
+        query_embedding: list[float],
+        top_k: int | None = None,
+    ) -> list[HybridSearchResult]:
+        """Retrieve chunks by fusing vector similarity and keyword relevance."""
+        limit = top_k or self.settings.rag_top_k
+        return await self.repository.hybrid_search(
+            query_text=query_text,
             query_embedding=query_embedding,
             limit=limit,
         )

@@ -38,6 +38,28 @@ class ChatRepository:
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def rename_session(
+        self,
+        *,
+        session: ChatSession,
+        title: str,
+    ) -> ChatSession:
+        """Rename a chat session owned by the user."""
+        session.title = title
+        self.session.add(session)
+        await self.session.flush()
+        await self.session.refresh(session)
+        return session
+
+    async def delete_session(self, *, session: ChatSession) -> None:
+        """Delete a chat session and its messages.
+
+        Token usage rows survive (their ``session_id`` is set NULL by the FK),
+        so aggregate usage metrics remain accurate after deletion.
+        """
+        await self.session.delete(session)
+        await self.session.flush()
+
     async def list_user_sessions(
         self,
         *,
@@ -146,3 +168,16 @@ class ChatRepository:
         await self.session.flush()
         await self.session.refresh(token_usage)
         return token_usage
+
+    async def commit(self) -> None:
+        """Persist the current transaction.
+
+        Used by the streaming chat endpoint, where the response body is produced
+        by a generator that runs after the route returns, so persistence must be
+        committed explicitly instead of relying on the request-scoped auto-commit.
+        """
+        await self.session.commit()
+
+    async def rollback(self) -> None:
+        """Discard uncommitted work (used when a streamed answer fails mid-flight)."""
+        await self.session.rollback()

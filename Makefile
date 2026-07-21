@@ -4,7 +4,7 @@
 # Usage: make <target>
 # =============================================================================
 
-.PHONY: help install dev lint format typecheck test run docker-up docker-down clean
+.PHONY: help install dev lint format typecheck test run seed-staging frontend-install frontend-run frontend-lint frontend-typecheck frontend-build docker-up docker-down clean
 
 # Default target
 help: ## Show this help message
@@ -15,11 +15,13 @@ help: ## Show this help message
 
 install: ## Install production dependencies
 	cd backend && uv sync --frozen
+	cd frontend && npm install
 
 dev: ## Install all dependencies (including dev)
 	cd backend && uv sync --frozen --all-extras
 	cp -n .env.example .env 2>/dev/null || true
 	cd backend && uv run pre-commit install
+	cd frontend && npm install
 
 # ── Code Quality ─────────────────────────────────────────────────────────────
 
@@ -47,6 +49,24 @@ test-cov: ## Run tests with coverage
 
 run: ## Start FastAPI development server
 	cd backend && uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+seed-staging: ## Seed 2 admins + 6 users (idempotent; refuses production)
+	cd backend && uv run python -m scripts.seed_staging
+
+frontend-install: ## Install frontend dependencies
+	cd frontend && npm install
+
+frontend-run: ## Start Next.js development server
+	cd frontend && npm run dev
+
+frontend-lint: ## Run frontend ESLint
+	cd frontend && npm run lint
+
+frontend-typecheck: ## Run frontend TypeScript checks
+	cd frontend && npm run typecheck
+
+frontend-build: ## Build frontend for production
+	cd frontend && npm run build
 
 # ── Docker ───────────────────────────────────────────────────────────────────
 

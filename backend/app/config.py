@@ -145,6 +145,10 @@ class Settings(BaseSettings):
         default=0.25,
         description="Minimum vector similarity required before calling the LLM",
     )
+    rag_min_keyword_score: float = Field(
+        default=0.1,
+        description="Minimum keyword (ts_rank_cd) score that also qualifies a chunk as relevant",
+    )
     chat_history_messages_limit: int = Field(
         default=10,
         ge=1,

@@ -41,6 +41,7 @@ def _create_token(user: User, token_type: str, expires_delta: timedelta) -> str:
         "iat": now,
         "sub": str(user.id),
         "email": user.email,
+        "full_name": user.full_name,
         "role": user.role.value,
         "type": token_type,
     }

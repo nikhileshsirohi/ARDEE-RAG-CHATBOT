@@ -96,6 +96,8 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101"]  # assert is the standard pattern in pytest
+# Operational scripts print progress and carry a non-secret staging default.
+"scripts/**/*.py" = ["T201", "S105"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]

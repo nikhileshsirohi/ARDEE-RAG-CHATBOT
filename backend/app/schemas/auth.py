@@ -27,6 +27,7 @@ class TokenPayload(BaseModel):
 
     sub: str = Field(..., description="Subject (User ID)")
     email: str = Field(..., description="User's email address")
+    full_name: str | None = Field(default=None, description="User's display name")
     role: UserRole = Field(..., description="User's role")
     exp: datetime = Field(..., description="Expiration time")
     iat: datetime = Field(..., description="Issued at time")

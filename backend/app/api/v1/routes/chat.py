@@ -1,15 +1,19 @@
 """Authenticated RAG chatbot routes."""
 
+import json
 import uuid
+from collections.abc import AsyncGenerator
 from typing import Annotated, cast
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi.responses import StreamingResponse
 
 from app.api.dependencies.auth import ActiveUserDep, SessionDep
 from app.config import get_settings
 from app.core.exceptions import NotFoundError
 from app.core.redis import get_redis_client
 from app.repositories.chat import ChatRepository
+from app.repositories.metrics import MetricsRepository
 from app.repositories.rag_retrieval import RagRetrievalRepository
 from app.schemas.rag import (
     ChatAskRequest,
@@ -17,6 +21,8 @@ from app.schemas.rag import (
     ChatMessageResponse,
     ChatSessionDetailResponse,
     ChatSessionResponse,
+    ChatSessionUpdate,
+    MyTokenUsageSummary,
 )
 from app.services.chat import ChatService, OpenAIChatAnswerService
 from app.services.pdf_ingestion import OpenAIEmbeddingService
@@ -54,6 +60,14 @@ def get_chat_repository(session: SessionDep) -> ChatRepository:
 ChatRepositoryDep = Annotated[ChatRepository, Depends(get_chat_repository)]
 
 
+def get_metrics_repository(session: SessionDep) -> MetricsRepository:
+    """Build request-scoped metrics repository."""
+    return MetricsRepository(session)
+
+
+MetricsRepositoryDep = Annotated[MetricsRepository, Depends(get_metrics_repository)]
+
+
 @router.post("/ask", response_model=ChatAskResponse, summary="Ask the RAG chatbot")
 async def ask_chatbot(
     request: ChatAskRequest,
@@ -68,6 +82,62 @@ async def ask_chatbot(
         top_k=request.top_k,
     )
     return ChatAskResponse(**answer.__dict__)
+
+
+@router.post(
+    "/ask/stream",
+    summary="Ask the RAG chatbot with a streamed answer",
+    response_class=StreamingResponse,
+)
+async def ask_chatbot_stream(
+    request: ChatAskRequest,
+    current_user: ActiveUserDep,
+    service: ChatServiceDep,
+) -> StreamingResponse:
+    """Ask a question and stream the answer token-by-token via Server-Sent Events.
+
+    Each SSE ``data:`` line carries a JSON event:
+        - ``{"type": "meta", "session_id": ...}`` — emitted first.
+        - ``{"type": "token", "text": ...}`` — incremental answer text.
+        - ``{"type": "done", ...}`` — final message id, citations, and token usage.
+        - ``{"type": "error", "message": ...}`` — a failure occurred mid-stream.
+    """
+
+    async def event_stream() -> AsyncGenerator[str]:
+        try:
+            async for event in service.ask_stream(
+                user=current_user,
+                question=request.question,
+                session_id=request.session_id,
+                top_k=request.top_k,
+            ):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as exc:  # surface a clean SSE error to the client
+            payload = {"type": "error", "message": str(exc)}
+            yield f"data: {json.dumps(payload)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get(
+    "/usage/me",
+    response_model=MyTokenUsageSummary,
+    summary="Get my token usage totals and per-session breakdown",
+)
+async def get_my_token_usage(
+    current_user: ActiveUserDep,
+    repository: MetricsRepositoryDep,
+) -> MyTokenUsageSummary:
+    """Return the authenticated user's own token usage: totals plus per session."""
+    return await repository.get_user_usage_summary(user_id=current_user.id)
 
 
 @router.get(
@@ -119,3 +189,48 @@ async def get_my_chat_session(
         session=ChatSessionResponse.model_validate(chat_session),
         messages=[ChatMessageResponse.model_validate(message) for message in messages],
     )
+
+
+@router.patch(
+    "/sessions/{session_id}",
+    response_model=ChatSessionResponse,
+    summary="Rename my chat session",
+)
+async def rename_my_chat_session(
+    session_id: uuid.UUID,
+    payload: ChatSessionUpdate,
+    current_user: ActiveUserDep,
+    repository: ChatRepositoryDep,
+) -> ChatSessionResponse:
+    """Rename a chat session owned by the current user."""
+    chat_session = await repository.get_user_session(
+        session_id=session_id,
+        user_id=current_user.id,
+    )
+    if chat_session is None:
+        raise NotFoundError("Chat session not found")
+
+    updated = await repository.rename_session(session=chat_session, title=payload.title)
+    return ChatSessionResponse.model_validate(updated)
+
+
+@router.delete(
+    "/sessions/{session_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete my chat session",
+)
+async def delete_my_chat_session(
+    session_id: uuid.UUID,
+    current_user: ActiveUserDep,
+    repository: ChatRepositoryDep,
+) -> Response:
+    """Delete a chat session and its messages, owned by the current user."""
+    chat_session = await repository.get_user_session(
+        session_id=session_id,
+        user_id=current_user.id,
+    )
+    if chat_session is None:
+        raise NotFoundError("Chat session not found")
+
+    await repository.delete_session(session=chat_session)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

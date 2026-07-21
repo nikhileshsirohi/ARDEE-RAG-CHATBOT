@@ -1,6 +1,7 @@
 """Tests for RAG chatbot orchestration."""
 
 import uuid
+from collections.abc import AsyncIterator
 
 import pytest
 
@@ -10,7 +11,12 @@ from app.main import create_app
 from app.models.rag import ChatMessage, ChatMessageRole, ChatSession
 from app.models.user import User, UserRole
 from app.repositories.rag_retrieval import HybridSearchResult
-from app.services.chat import ChatService, GeneratedAnswer, OpenAIChatAnswerService
+from app.services.chat import (
+    AnswerStreamChunk,
+    ChatService,
+    GeneratedAnswer,
+    OpenAIChatAnswerService,
+)
 from app.services.semantic_cache import SemanticCacheHit
 
 
@@ -96,6 +102,12 @@ class FakeChatRepository:
     async def record_token_usage(self, **kwargs: object) -> None:
         self.token_usage_records.append(kwargs)
 
+    async def commit(self) -> None:
+        self.commit_call_count = getattr(self, "commit_call_count", 0) + 1
+
+    async def rollback(self) -> None:
+        self.rollback_call_count = getattr(self, "rollback_call_count", 0) + 1
+
 
 class FakeRetrievalService:
     """Return deterministic RAG chunks."""
@@ -126,6 +138,16 @@ class FakeRetrievalService:
         _ = query
         _ = top_k
         return await self.search_by_embedding(query_embedding=self.query_embedding, top_k=top_k)
+
+    async def search_hybrid(
+        self,
+        *,
+        query_text: str,
+        query_embedding: list[float],
+        top_k: int | None = None,
+    ) -> list[HybridSearchResult]:
+        _ = query_text
+        return await self.search_by_embedding(query_embedding=query_embedding, top_k=top_k)
 
     async def search_by_embedding(
         self,
@@ -160,6 +182,15 @@ class FakeAnswerService:
         self.chat_history: list[ChatMessage] | None = None
         self.retrieved_chunks: list[HybridSearchResult] | None = None
         self.was_called = False
+        self.greeting_called = False
+
+    async def answer_greeting(self, *, question: str) -> GeneratedAnswer:
+        self.greeting_called = True
+        return GeneratedAnswer(
+            answer=f"Hello! How can I help you with the documents? ({question})",
+            input_tokens=3,
+            output_tokens=9,
+        )
 
     async def answer_question(
         self,
@@ -176,6 +207,21 @@ class FakeAnswerService:
             input_tokens=11,
             output_tokens=7,
         )
+
+    async def stream_answer_question(
+        self,
+        *,
+        question: str,
+        retrieved_chunks: list[HybridSearchResult],
+        chat_history: list[ChatMessage],
+    ) -> AsyncIterator[AnswerStreamChunk]:
+        self.was_called = True
+        self.chat_history = chat_history
+        self.retrieved_chunks = retrieved_chunks
+        answer = f"Answer for {question} with {len(retrieved_chunks)} source"
+        for word in answer.split(" "):
+            yield AnswerStreamChunk(text=f"{word} ")
+        yield AnswerStreamChunk(input_tokens=11, output_tokens=7)
 
 
 class FakeSemanticCacheService:
@@ -366,9 +412,12 @@ async def test_chat_service_does_not_cache_low_confidence_answer() -> None:
     cache_service = FakeSemanticCacheService()
     service = ChatService(
         chat_repository=FakeChatRepository(),  # type: ignore[arg-type]
-        retrieval_service=FakeRetrievalService(vector_scores=[0.01]),  # type: ignore[arg-type]
+        # Both signals below threshold → genuinely low confidence.
+        retrieval_service=FakeRetrievalService(  # type: ignore[arg-type]
+            vector_scores=[0.01], keyword_scores=[0]
+        ),
         answer_service=FakeAnswerService(),  # type: ignore[arg-type]
-        settings=Settings(rag_min_vector_score=0.25),
+        settings=Settings(rag_min_vector_score=0.25, rag_min_keyword_score=0.1),
         semantic_cache_service=cache_service,  # type: ignore[arg-type]
     )
 
@@ -575,8 +624,216 @@ def test_chat_ask_route_is_registered() -> None:
     route_paths = set(app.openapi()["paths"].keys())
 
     assert "/api/v1/chat/ask" in route_paths
+    assert "/api/v1/chat/ask/stream" in route_paths
     assert "/api/v1/chat/sessions" in route_paths
     assert "/api/v1/chat/sessions/{session_id}" in route_paths
+    assert "/api/v1/chat/usage/me" in route_paths
+
+
+def test_chat_session_and_usage_routes_support_expected_methods() -> None:
+    """Rename/delete a session and read own usage should be registered."""
+    app = create_app()
+    paths = app.openapi()["paths"]
+
+    session_methods = set(paths["/api/v1/chat/sessions/{session_id}"].keys())
+    assert {"get", "patch", "delete"}.issubset(session_methods)
+    assert "get" in paths["/api/v1/chat/usage/me"]
+    assert "get" in paths["/api/v1/admin/metrics/token-usage/daily"]
+
+
+@pytest.mark.anyio
+async def test_chat_service_streams_answer_tokens_and_records_usage() -> None:
+    """Streaming should emit meta, token deltas, a done event, and persist usage."""
+    repository = FakeChatRepository()
+    answer_service = FakeAnswerService()
+    service = ChatService(
+        chat_repository=repository,  # type: ignore[arg-type]
+        retrieval_service=FakeRetrievalService(),  # type: ignore[arg-type]
+        answer_service=answer_service,  # type: ignore[arg-type]
+        settings=Settings(rag_top_k=3),
+    )
+
+    events = [
+        event
+        async for event in service.ask_stream(
+            user=make_user(),
+            question="  What is   HR policy? ",
+            session_id=None,
+            top_k=None,
+        )
+    ]
+
+    assert events[0]["type"] == "meta"
+    token_events = [event for event in events if event["type"] == "token"]
+    assert token_events, "expected streamed token events"
+    streamed_text = "".join(str(event["text"]) for event in token_events).strip()
+    done = events[-1]
+    assert done["type"] == "done"
+    assert done["answer"] == streamed_text
+    assert done["answer"] == "Answer for What is HR policy? with 1 source"
+    assert done["total_tokens"] == 11 + 7 + 4
+    assert done["semantic_cache_hit"] is False
+    assert getattr(repository, "commit_call_count", 0) == 1
+    assert [message.role for message in repository.messages] == [
+        ChatMessageRole.USER,
+        ChatMessageRole.ASSISTANT,
+    ]
+
+
+@pytest.mark.anyio
+async def test_chat_service_answers_greeting_without_retrieval() -> None:
+    """A greeting should be answered by the LLM, skipping retrieval and citations."""
+    repository = FakeChatRepository()
+    retrieval = FakeRetrievalService()
+    answer_service = FakeAnswerService()
+    service = ChatService(
+        chat_repository=repository,  # type: ignore[arg-type]
+        retrieval_service=retrieval,  # type: ignore[arg-type]
+        answer_service=answer_service,  # type: ignore[arg-type]
+        settings=Settings(rag_top_k=3),
+    )
+
+    answer = await service.ask(
+        user=make_user(),
+        question="Hello there!",
+        session_id=None,
+        top_k=None,
+    )
+
+    assert answer_service.greeting_called is True
+    assert answer_service.was_called is False  # no RAG generation
+    assert retrieval.search_call_count == 0  # no retrieval
+    assert answer.source_citations == []
+    assert answer.semantic_cache_hit is False
+    assert answer.total_tokens == 3 + 9  # no embedding tokens for greetings
+    assert repository.token_usage_records[0]["embedding_tokens"] == 0
+    assert [message.role for message in repository.messages] == [
+        ChatMessageRole.USER,
+        ChatMessageRole.ASSISTANT,
+    ]
+
+
+@pytest.mark.anyio
+async def test_chat_service_streams_greeting_reply() -> None:
+    """Streaming a greeting should emit tokens then a done event, no retrieval."""
+    repository = FakeChatRepository()
+    retrieval = FakeRetrievalService()
+    answer_service = FakeAnswerService()
+    service = ChatService(
+        chat_repository=repository,  # type: ignore[arg-type]
+        retrieval_service=retrieval,  # type: ignore[arg-type]
+        answer_service=answer_service,  # type: ignore[arg-type]
+        settings=Settings(rag_top_k=3),
+    )
+
+    events = [
+        event
+        async for event in service.ask_stream(
+            user=make_user(),
+            question="good morning",
+            session_id=None,
+            top_k=None,
+        )
+    ]
+
+    assert answer_service.greeting_called is True
+    assert retrieval.search_call_count == 0
+    done = events[-1]
+    assert done["type"] == "done"
+    assert done["source_citations"] == []
+    assert done["total_tokens"] == 3 + 9
+    assert getattr(repository, "commit_call_count", 0) == 1
+
+
+@pytest.mark.anyio
+async def test_chat_service_uses_hybrid_search_for_questions() -> None:
+    """Real questions must go through hybrid search, passing the query text."""
+    repository = FakeChatRepository()
+    retrieval = FakeRetrievalService()
+    answer_service = FakeAnswerService()
+    service = ChatService(
+        chat_repository=repository,  # type: ignore[arg-type]
+        retrieval_service=retrieval,  # type: ignore[arg-type]
+        answer_service=answer_service,  # type: ignore[arg-type]
+        settings=Settings(rag_top_k=3),
+    )
+
+    answer = await service.ask(
+        user=make_user(),
+        question="What is scaled dot-product attention?",
+        session_id=None,
+        top_k=None,
+    )
+
+    assert answer_service.greeting_called is False
+    assert retrieval.search_call_count == 1  # hybrid search delegates here
+    assert answer.source_citations  # citations produced from retrieved chunks
+
+
+@pytest.mark.anyio
+async def test_chat_service_keeps_strong_keyword_only_chunks() -> None:
+    """A low vector score but strong keyword match still counts as enough context."""
+    repository = FakeChatRepository()
+    # vector below threshold, keyword above the keyword threshold.
+    retrieval = FakeRetrievalService(vector_scores=[0.05], keyword_scores=[0.4])
+    answer_service = FakeAnswerService()
+    service = ChatService(
+        chat_repository=repository,  # type: ignore[arg-type]
+        retrieval_service=retrieval,  # type: ignore[arg-type]
+        answer_service=answer_service,  # type: ignore[arg-type]
+        settings=Settings(rag_top_k=3, rag_min_vector_score=0.25, rag_min_keyword_score=0.1),
+    )
+
+    await service.ask(
+        user=make_user(),
+        question="What is the attention head count?",
+        session_id=None,
+        top_k=None,
+    )
+
+    assert answer_service.was_called is True  # keyword match kept the chunk
+
+
+@pytest.mark.anyio
+async def test_chat_service_streams_cache_hit_without_llm() -> None:
+    """A semantic cache hit should stream the cached answer without the LLM."""
+    repository = FakeChatRepository()
+    answer_service = FakeAnswerService()
+    cache = FakeSemanticCacheService(
+        hit=SemanticCacheHit(
+            answer="Cached answer text",
+            source_citations=[{"document_title": "Doc"}],
+            similarity=0.99,
+            input_tokens=0,
+            output_tokens=0,
+        )
+    )
+    service = ChatService(
+        chat_repository=repository,  # type: ignore[arg-type]
+        retrieval_service=FakeRetrievalService(),  # type: ignore[arg-type]
+        answer_service=answer_service,  # type: ignore[arg-type]
+        settings=Settings(rag_top_k=3),
+        semantic_cache_service=cache,  # type: ignore[arg-type]
+    )
+
+    events = [
+        event
+        async for event in service.ask_stream(
+            user=make_user(),
+            question="Cached question",
+            session_id=None,
+            top_k=None,
+        )
+    ]
+
+    done = events[-1]
+    assert answer_service.was_called is False
+    assert done["semantic_cache_hit"] is True
+    assert done["answer"] == "Cached answer text"
+    streamed_text = "".join(
+        str(event["text"]) for event in events if event["type"] == "token"
+    )
+    assert streamed_text == "Cached answer text"
 
 
 @pytest.mark.anyio

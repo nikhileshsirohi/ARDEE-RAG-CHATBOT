@@ -1,7 +1,7 @@
 """Pydantic schemas for RAG documents, chat history, cache, and metrics."""
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -48,6 +48,12 @@ class ChatSessionCreate(BaseModel):
     """Request body for creating a user-owned chat session."""
 
     title: str = Field(default="New chat", min_length=1, max_length=255)
+
+
+class ChatSessionUpdate(BaseModel):
+    """Request body for renaming a user-owned chat session."""
+
+    title: str = Field(..., min_length=1, max_length=255)
 
 
 class ChatAskRequest(BaseModel):
@@ -148,3 +154,39 @@ class UserTokenUsageMetric(BaseModel):
     embedding_tokens: int = Field(..., ge=0)
     total_tokens: int = Field(..., ge=0)
     request_count: int = Field(..., ge=0)
+
+
+class DailyTokenUsageMetric(BaseModel):
+    """Per-day token usage bucket for the admin usage chart."""
+
+    day: date
+    input_tokens: int = Field(..., ge=0)
+    output_tokens: int = Field(..., ge=0)
+    embedding_tokens: int = Field(..., ge=0)
+    total_tokens: int = Field(..., ge=0)
+    request_count: int = Field(..., ge=0)
+
+
+class SessionTokenUsageMetric(BaseModel):
+    """Per-session token usage for a single user."""
+
+    session_id: uuid.UUID
+    title: str
+    last_message_at: datetime | None
+    input_tokens: int = Field(..., ge=0)
+    output_tokens: int = Field(..., ge=0)
+    embedding_tokens: int = Field(..., ge=0)
+    total_tokens: int = Field(..., ge=0)
+    request_count: int = Field(..., ge=0)
+
+
+class MyTokenUsageSummary(BaseModel):
+    """A user's own aggregate token usage plus per-session breakdown."""
+
+    input_tokens: int = Field(..., ge=0)
+    output_tokens: int = Field(..., ge=0)
+    embedding_tokens: int = Field(..., ge=0)
+    total_tokens: int = Field(..., ge=0)
+    request_count: int = Field(..., ge=0)
+    session_count: int = Field(..., ge=0)
+    sessions: list[SessionTokenUsageMetric]

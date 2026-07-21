@@ -1,14 +1,21 @@
 """Repository for admin metrics and usage reporting."""
 
+import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Select, and_, func, select
+from sqlalchemy import Select, and_, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.types import Date
 
-from app.models.rag import TokenUsage
+from app.models.rag import ChatSession, TokenUsage
 from app.models.user import User
-from app.schemas.rag import UserTokenUsageMetric
+from app.schemas.rag import (
+    DailyTokenUsageMetric,
+    MyTokenUsageSummary,
+    SessionTokenUsageMetric,
+    UserTokenUsageMetric,
+)
 
 
 class MetricsRepository:
@@ -74,3 +81,115 @@ class MetricsRepository:
             )
             for row in result.mappings().all()
         ]
+
+    async def list_daily_token_usage(
+        self,
+        *,
+        start_at: datetime,
+        end_at: datetime,
+        user_id: uuid.UUID | None,
+    ) -> list[DailyTokenUsageMetric]:
+        """Aggregate token usage into per-day buckets for the usage chart.
+
+        When ``user_id`` is provided the buckets are scoped to that user;
+        otherwise they span every user. Days with no usage are omitted — the
+        caller fills gaps so the chart always shows a full window.
+        """
+        conditions = [
+            TokenUsage.created_at >= start_at,
+            TokenUsage.created_at <= end_at,
+        ]
+        if user_id is not None:
+            conditions.append(TokenUsage.user_id == user_id)
+
+        day = cast(TokenUsage.created_at, Date).label("day")
+
+        stmt: Select[Any] = (
+            select(
+                day,
+                func.coalesce(func.sum(TokenUsage.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(TokenUsage.output_tokens), 0).label("output_tokens"),
+                func.coalesce(func.sum(TokenUsage.embedding_tokens), 0).label("embedding_tokens"),
+                func.coalesce(func.sum(TokenUsage.total_tokens), 0).label("total_tokens"),
+                func.count(TokenUsage.id).label("request_count"),
+            )
+            .where(and_(*conditions))
+            .group_by(day)
+            .order_by(day)
+        )
+
+        result = await self.session.execute(stmt)
+        return [
+            DailyTokenUsageMetric(
+                day=row["day"],
+                input_tokens=int(row["input_tokens"]),
+                output_tokens=int(row["output_tokens"]),
+                embedding_tokens=int(row["embedding_tokens"]),
+                total_tokens=int(row["total_tokens"]),
+                request_count=int(row["request_count"]),
+            )
+            for row in result.mappings().all()
+        ]
+
+    async def get_user_usage_summary(
+        self,
+        *,
+        user_id: uuid.UUID,
+    ) -> MyTokenUsageSummary:
+        """Return one user's total token usage plus a per-session breakdown."""
+        input_tokens = func.coalesce(func.sum(TokenUsage.input_tokens), 0)
+        output_tokens = func.coalesce(func.sum(TokenUsage.output_tokens), 0)
+        embedding_tokens = func.coalesce(func.sum(TokenUsage.embedding_tokens), 0)
+        total_tokens = func.coalesce(func.sum(TokenUsage.total_tokens), 0)
+        request_count = func.count(TokenUsage.id)
+
+        totals_stmt: Select[Any] = select(
+            input_tokens.label("input_tokens"),
+            output_tokens.label("output_tokens"),
+            embedding_tokens.label("embedding_tokens"),
+            total_tokens.label("total_tokens"),
+            request_count.label("request_count"),
+        ).where(TokenUsage.user_id == user_id)
+        totals_row = (await self.session.execute(totals_stmt)).mappings().one()
+
+        sessions_stmt: Select[Any] = (
+            select(
+                ChatSession.id.label("session_id"),
+                ChatSession.title,
+                ChatSession.last_message_at,
+                input_tokens.label("input_tokens"),
+                output_tokens.label("output_tokens"),
+                embedding_tokens.label("embedding_tokens"),
+                total_tokens.label("total_tokens"),
+                request_count.label("request_count"),
+            )
+            .join(TokenUsage, TokenUsage.session_id == ChatSession.id)
+            .where(ChatSession.user_id == user_id, ChatSession.is_archived.is_(False))
+            .group_by(ChatSession.id, ChatSession.title, ChatSession.last_message_at)
+            .order_by(total_tokens.desc(), ChatSession.last_message_at.desc().nullslast())
+        )
+        session_rows = (await self.session.execute(sessions_stmt)).mappings().all()
+
+        sessions = [
+            SessionTokenUsageMetric(
+                session_id=row["session_id"],
+                title=row["title"],
+                last_message_at=row["last_message_at"],
+                input_tokens=int(row["input_tokens"]),
+                output_tokens=int(row["output_tokens"]),
+                embedding_tokens=int(row["embedding_tokens"]),
+                total_tokens=int(row["total_tokens"]),
+                request_count=int(row["request_count"]),
+            )
+            for row in session_rows
+        ]
+
+        return MyTokenUsageSummary(
+            input_tokens=int(totals_row["input_tokens"]),
+            output_tokens=int(totals_row["output_tokens"]),
+            embedding_tokens=int(totals_row["embedding_tokens"]),
+            total_tokens=int(totals_row["total_tokens"]),
+            request_count=int(totals_row["request_count"]),
+            session_count=len(sessions),
+            sessions=sessions,
+        )

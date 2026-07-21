@@ -16,16 +16,10 @@ class FakeRetrievalRepository:
 
     def __init__(self) -> None:
         self.query_embedding: list[float] | None = None
+        self.query_text: str | None = None
         self.limit: int | None = None
 
-    async def vector_search(
-        self,
-        *,
-        query_embedding: list[float],
-        limit: int,
-    ) -> list[HybridSearchResult]:
-        self.query_embedding = query_embedding
-        self.limit = limit
+    def _results(self) -> list[HybridSearchResult]:
         return [
             HybridSearchResult(
                 chunk_id=uuid.uuid4(),
@@ -40,6 +34,28 @@ class FakeRetrievalRepository:
                 hybrid_score=0,
             )
         ]
+
+    async def vector_search(
+        self,
+        *,
+        query_embedding: list[float],
+        limit: int,
+    ) -> list[HybridSearchResult]:
+        self.query_embedding = query_embedding
+        self.limit = limit
+        return self._results()
+
+    async def hybrid_search(
+        self,
+        *,
+        query_text: str,
+        query_embedding: list[float],
+        limit: int,
+    ) -> list[HybridSearchResult]:
+        self.query_text = query_text
+        self.query_embedding = query_embedding
+        self.limit = limit
+        return self._results()
 
 
 class FakeEmbeddingService:
