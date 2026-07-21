@@ -141,8 +141,15 @@ class Settings(BaseSettings):
     rag_chunk_overlap: int = Field(default=50, description="Overlap between chunks")
     rag_top_k: int = Field(default=5, description="Number of retrieved chunks")
     rag_embedding_batch_size: int = Field(default=100, description="Embedding batch size")
+    rag_min_vector_score: float = Field(
+        default=0.25,
+        description="Minimum vector similarity required before calling the LLM",
+    )
     chat_history_messages_limit: int = Field(
-        default=10, description="Number of previous chat messages to include in answers"
+        default=10,
+        ge=1,
+        le=20,
+        description="Number of previous chat messages to include in answers",
     )
 
     # ── CORS ──────────────────────────────────────────────────────────────────

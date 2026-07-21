@@ -69,6 +69,8 @@ class ChatAskResponse(BaseModel):
     output_tokens: int = Field(..., ge=0)
     total_tokens: int = Field(..., ge=0)
     latency_ms: int = Field(..., ge=0)
+    semantic_cache_hit: bool
+    semantic_cache_similarity: float | None = Field(default=None, ge=0, le=1)
 
 
 class ChatSessionResponse(BaseModel):

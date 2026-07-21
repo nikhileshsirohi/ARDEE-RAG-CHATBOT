@@ -1,4 +1,4 @@
-"""Tests for hybrid RAG retrieval."""
+"""Tests for embedding RAG retrieval."""
 
 import uuid
 
@@ -15,18 +15,15 @@ class FakeRetrievalRepository:
     """Capture retrieval inputs and return deterministic results."""
 
     def __init__(self) -> None:
-        self.query_text: str | None = None
         self.query_embedding: list[float] | None = None
         self.limit: int | None = None
 
-    async def hybrid_search(
+    async def vector_search(
         self,
         *,
-        query_text: str,
         query_embedding: list[float],
         limit: int,
     ) -> list[HybridSearchResult]:
-        self.query_text = query_text
         self.query_embedding = query_embedding
         self.limit = limit
         return [
@@ -39,8 +36,8 @@ class FakeRetrievalRepository:
                 content="Policy content",
                 token_count=2,
                 vector_score=0.9,
-                keyword_score=0.2,
-                hybrid_score=0.03,
+                keyword_score=0,
+                hybrid_score=0,
             )
         ]
 
@@ -72,7 +69,6 @@ async def test_retrieval_service_normalizes_query_and_uses_default_top_k() -> No
     results = await service.search(query="  employee   policy  ")
 
     assert len(results) == 1
-    assert repository.query_text == "employee policy"
     assert repository.limit == 7
     assert repository.query_embedding == [15.0] * 1536
 
@@ -106,7 +102,7 @@ async def test_retrieval_service_rejects_blank_query() -> None:
 
 
 def test_rag_search_route_is_registered() -> None:
-    """Hybrid search route should be available under API v1."""
+    """Embedding search route should be available under API v1."""
     app = create_app()
     route_paths = set(app.openapi()["paths"].keys())
 

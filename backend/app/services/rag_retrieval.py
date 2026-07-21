@@ -1,4 +1,4 @@
-"""Hybrid retrieval service for RAG."""
+"""Embedding retrieval service for RAG."""
 
 from app.config import Settings
 from app.core.exceptions import BadRequestError
@@ -7,7 +7,7 @@ from app.services.pdf_ingestion import OpenAIEmbeddingService
 
 
 class RagRetrievalService:
-    """Run hybrid retrieval for user/admin RAG queries."""
+    """Run embedding retrieval for user/admin RAG queries."""
 
     def __init__(
         self,
@@ -25,11 +25,27 @@ class RagRetrievalService:
         if not normalized_query:
             raise BadRequestError("Search query is required")
 
-        limit = top_k or self.settings.rag_top_k
-        embeddings = await self.embedding_service.embed_texts([normalized_query])
+        query_embedding = await self.embed_query(normalized_query)
+        return await self.search_by_embedding(query_embedding=query_embedding, top_k=top_k)
 
-        return await self.repository.hybrid_search(
-            query_text=normalized_query,
-            query_embedding=embeddings[0],
+    async def embed_query(self, query: str) -> list[float]:
+        """Embed a normalized query."""
+        normalized_query = " ".join(query.split())
+        if not normalized_query:
+            raise BadRequestError("Search query is required")
+
+        embeddings = await self.embedding_service.embed_texts([normalized_query])
+        return embeddings[0]
+
+    async def search_by_embedding(
+        self,
+        *,
+        query_embedding: list[float],
+        top_k: int | None = None,
+    ) -> list[HybridSearchResult]:
+        """Retrieve chunks using an existing query embedding."""
+        limit = top_k or self.settings.rag_top_k
+        return await self.repository.vector_search(
+            query_embedding=query_embedding,
             limit=limit,
         )

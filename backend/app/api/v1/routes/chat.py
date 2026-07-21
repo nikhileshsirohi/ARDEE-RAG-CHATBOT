@@ -1,13 +1,14 @@
 """Authenticated RAG chatbot routes."""
 
 import uuid
-from typing import Annotated
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, Query
 
 from app.api.dependencies.auth import ActiveUserDep, SessionDep
 from app.config import get_settings
 from app.core.exceptions import NotFoundError
+from app.core.redis import get_redis_client
 from app.repositories.chat import ChatRepository
 from app.repositories.rag_retrieval import RagRetrievalRepository
 from app.schemas.rag import (
@@ -20,6 +21,7 @@ from app.schemas.rag import (
 from app.services.chat import ChatService, OpenAIChatAnswerService
 from app.services.pdf_ingestion import OpenAIEmbeddingService
 from app.services.rag_retrieval import RagRetrievalService
+from app.services.semantic_cache import RedisLike, SemanticCacheService
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
 
@@ -37,6 +39,7 @@ def get_chat_service(session: SessionDep) -> ChatService:
         retrieval_service=retrieval_service,
         answer_service=OpenAIChatAnswerService(settings),
         settings=settings,
+        semantic_cache_service=SemanticCacheService(cast(RedisLike, get_redis_client()), settings),
     )
 
 
