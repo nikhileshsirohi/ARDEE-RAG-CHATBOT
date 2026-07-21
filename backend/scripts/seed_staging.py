@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from app.config import get_settings
 from app.core.database import _get_session_factory as get_session_factory
 from app.core.database import close_db, init_db
+from app.core.logging import setup_logging
 from app.core.security import get_password_hash
 from app.models.user import User, UserRole
 from app.repositories.user import UserRepository
@@ -112,6 +113,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    setup_logging()
     settings = get_settings()
     env = settings.app_env
     print(f"Environment: {env}")

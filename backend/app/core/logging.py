@@ -41,6 +41,20 @@ def setup_logging() -> None:
         structlog.processors.UnicodeDecoder(),
     ]
 
+    # Applied to log records that did NOT originate from structlog (e.g.
+    # SQLAlchemy, uvicorn, passlib). Without this, those records render with no
+    # timestamp / level / logger name, so they look nothing like our own logs.
+    # It intentionally omits filter_by_level (handled by logger levels below)
+    # and wrap_for_formatter (only for structlog-native records).
+    foreign_pre_chain: list[structlog.types.Processor] = [
+        structlog.contextvars.merge_contextvars,
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.PositionalArgumentsFormatter(),
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.UnicodeDecoder(),
+    ]
+
     if settings.is_production:
         # Production: JSON output for log aggregation
         renderer: structlog.types.Processor = structlog.processors.JSONRenderer()
@@ -58,8 +72,10 @@ def setup_logging() -> None:
         cache_logger_on_first_use=True,
     )
 
-    # Configure stdlib logging to use structlog's formatter
+    # Configure stdlib logging to use structlog's formatter, so EVERY log line —
+    # ours and third-party — comes out in one consistent format.
     formatter = structlog.stdlib.ProcessorFormatter(
+        foreign_pre_chain=foreign_pre_chain,
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
             renderer,
@@ -75,9 +91,21 @@ def setup_logging() -> None:
     root_logger.addHandler(handler)
     root_logger.setLevel(log_level)
 
-    # Silence noisy third-party loggers
-    for logger_name in ("uvicorn.access", "uvicorn.error", "httpx", "httpcore"):
-        logging.getLogger(logger_name).setLevel(logging.WARNING)
+    # Tame noisy third-party loggers so the important lines stand out:
+    #   - passlib: raised to ERROR to hide the harmless "error reading bcrypt
+    #     version" traceback (a cosmetic passlib + bcrypt 4.x incompatibility).
+    #   - sqlalchemy.engine: INFO only when DB_ECHO is on; it then flows through
+    #     this handler as single, consistently formatted lines (no duplicates).
+    noisy_logger_levels = {
+        "uvicorn.access": logging.WARNING,
+        "uvicorn.error": logging.WARNING,
+        "httpx": logging.WARNING,
+        "httpcore": logging.WARNING,
+        "passlib": logging.ERROR,
+        "sqlalchemy.engine": logging.INFO if settings.db_echo else logging.WARNING,
+    }
+    for logger_name, level in noisy_logger_levels.items():
+        logging.getLogger(logger_name).setLevel(level)
 
 
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:

@@ -39,7 +39,11 @@ class Settings(BaseSettings):
     app_debug: bool = Field(default=True, description="Enable debug mode")
     app_host: str = Field(default="0.0.0.0", description="Server bind host")
     app_port: int = Field(default=8000, description="Server bind port")
-    app_log_level: str = Field(default="DEBUG", description="Log level")
+    app_log_level: str = Field(default="INFO", description="Log level")
+    db_echo: bool = Field(
+        default=False,
+        description="Log every SQL statement (verbose; routed through structlog when on)",
+    )
 
     # ── Database ─────────────────────────────────────────────────────────────
     postgres_host: str = Field(default="localhost", description="PostgreSQL host")

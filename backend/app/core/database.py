@@ -67,9 +67,14 @@ async def init_db() -> None:
 
     settings = get_settings()
 
+    # echo is kept False so SQLAlchemy does not attach its own stdout handler
+    # (which caused duplicate, differently-formatted log lines). SQL logging is
+    # instead controlled by the "sqlalchemy.engine" logger level in
+    # app.core.logging (driven by the DB_ECHO setting) so it renders through
+    # structlog like every other log line.
     _engine = create_async_engine(
         settings.database_url,
-        echo=settings.app_debug and not settings.is_production,
+        echo=False,
         pool_size=20,
         max_overflow=10,
         pool_timeout=30,
