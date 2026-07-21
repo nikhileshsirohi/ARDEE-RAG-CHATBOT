@@ -19,6 +19,7 @@ class UserBase(BaseModel):
     """Base user schema with shared attributes."""
 
     email: EmailStr = Field(..., description="User's email address")
+    full_name: str | None = Field(default=None, max_length=255, description="User's full name")
     role: UserRole = Field(default=UserRole.USER, description="User role")
     is_active: bool = Field(default=True, description="Account status")
 
@@ -27,6 +28,7 @@ class UserCreate(BaseModel):
     """Schema for creating a new user (Registration)."""
 
     email: EmailStr = Field(..., description="User's email address")
+    full_name: str | None = Field(default=None, max_length=255, description="User's full name")
     password: str = Field(..., min_length=8, description="Plain text password (min 8 chars)")
 
 
@@ -44,6 +46,7 @@ class UserUpdate(BaseModel):
     """Schema for updating user data (all fields optional)."""
 
     email: EmailStr | None = None
+    full_name: str | None = Field(default=None, max_length=255)
     role: UserRole | None = None
     is_active: bool | None = None
     password: str | None = Field(None, min_length=8)

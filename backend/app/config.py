@@ -9,10 +9,10 @@ Design Decisions:
 """
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pathlib import Path
 
 
 class Settings(BaseSettings):

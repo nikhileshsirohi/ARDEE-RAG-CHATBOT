@@ -6,7 +6,6 @@ Design Decisions:
 """
 
 import uuid
-from typing import cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
