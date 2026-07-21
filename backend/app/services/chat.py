@@ -5,10 +5,15 @@ import uuid
 from dataclasses import dataclass
 
 from openai import AsyncOpenAI
+from openai.types.chat import (
+    ChatCompletionAssistantMessageParam,
+    ChatCompletionMessageParam,
+    ChatCompletionUserMessageParam,
+)
 
 from app.config import Settings
 from app.core.exceptions import NotFoundError
-from app.models.rag import ChatMessageRole, ChatSession
+from app.models.rag import ChatMessage, ChatMessageRole, ChatSession
 from app.models.user import User
 from app.repositories.chat import ChatRepository
 from app.repositories.rag_retrieval import HybridSearchResult
@@ -55,18 +60,18 @@ class OpenAIChatAnswerService:
         *,
         question: str,
         retrieved_chunks: list[HybridSearchResult],
+        chat_history: list[ChatMessage],
     ) -> GeneratedAnswer:
         """Answer a question from retrieved chunks."""
         context = self._build_context(retrieved_chunks)
+        messages = self._build_messages(
+            question=question,
+            context=context,
+            chat_history=chat_history,
+        )
         response = await self.client.chat.completions.create(
             model=self.settings.openai_model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": f"Context:\n{context}\n\nQuestion:\n{question}",
-                },
-            ],
+            messages=messages,
             temperature=0.2,
         )
 
@@ -91,6 +96,42 @@ class OpenAIChatAnswerService:
             )
             for index, chunk in enumerate(retrieved_chunks, start=1)
         )
+
+    @staticmethod
+    def _build_messages(
+        *,
+        question: str,
+        context: str,
+        chat_history: list[ChatMessage],
+    ) -> list[ChatCompletionMessageParam]:
+        messages: list[ChatCompletionMessageParam] = [
+            {"role": "system", "content": SYSTEM_PROMPT}
+        ]
+
+        for message in chat_history:
+            if message.role == ChatMessageRole.SYSTEM:
+                continue
+
+            if message.role == ChatMessageRole.ASSISTANT:
+                assistant_message: ChatCompletionAssistantMessageParam = {
+                    "role": "assistant",
+                    "content": message.content,
+                }
+                messages.append(assistant_message)
+            else:
+                user_message: ChatCompletionUserMessageParam = {
+                    "role": "user",
+                    "content": message.content,
+                }
+                messages.append(user_message)
+
+        messages.append(
+            {
+                "role": "user",
+                "content": f"Context:\n{context}\n\nQuestion:\n{question}",
+            }
+        )
+        return messages
 
 
 class ChatService:
@@ -124,6 +165,10 @@ class ChatService:
             session_id=session_id,
             question=normalized_question,
         )
+        chat_history = await self.chat_repository.list_recent_session_messages(
+            session_id=chat_session.id,
+            limit=self.settings.chat_history_messages_limit,
+        )
 
         await self.chat_repository.add_message(
             session=chat_session,
@@ -139,6 +184,7 @@ class ChatService:
         generated_answer = await self.answer_service.answer_question(
             question=normalized_question,
             retrieved_chunks=retrieved_chunks,
+            chat_history=chat_history,
         )
         latency_ms = round((time.monotonic() - started_at) * 1000)
 

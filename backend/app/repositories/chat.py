@@ -77,6 +77,22 @@ class ChatRepository:
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_recent_session_messages(
+        self,
+        *,
+        session_id: uuid.UUID,
+        limit: int,
+    ) -> list[ChatMessage]:
+        """List recent messages for prompt memory in chronological order."""
+        stmt: Select[tuple[ChatMessage]] = (
+            select(ChatMessage)
+            .where(ChatMessage.session_id == session_id)
+            .order_by(ChatMessage.created_at.desc())
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return list(reversed(result.scalars().all()))
+
     async def add_message(
         self,
         *,

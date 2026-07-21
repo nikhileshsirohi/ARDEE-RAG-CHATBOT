@@ -10,7 +10,7 @@ from app.main import create_app
 from app.models.rag import ChatMessage, ChatMessageRole, ChatSession
 from app.models.user import User, UserRole
 from app.repositories.rag_retrieval import HybridSearchResult
-from app.services.chat import ChatService, GeneratedAnswer
+from app.services.chat import ChatService, GeneratedAnswer, OpenAIChatAnswerService
 
 
 class FakeChatRepository:
@@ -60,6 +60,15 @@ class FakeChatRepository:
     ) -> list[ChatMessage]:
         messages = [message for message in self.messages if message.session_id == session_id]
         return messages[offset : offset + limit]
+
+    async def list_recent_session_messages(
+        self,
+        *,
+        session_id: uuid.UUID,
+        limit: int,
+    ) -> list[ChatMessage]:
+        messages = [message for message in self.messages if message.session_id == session_id]
+        return messages[-limit:]
 
     async def add_message(
         self,
@@ -114,12 +123,17 @@ class FakeRetrievalService:
 class FakeAnswerService:
     """Return a deterministic answer."""
 
+    def __init__(self) -> None:
+        self.chat_history: list[ChatMessage] | None = None
+
     async def answer_question(
         self,
         *,
         question: str,
         retrieved_chunks: list[HybridSearchResult],
+        chat_history: list[ChatMessage],
     ) -> GeneratedAnswer:
+        self.chat_history = chat_history
         return GeneratedAnswer(
             answer=f"Answer for {question} with {len(retrieved_chunks)} source",
             input_tokens=11,
@@ -139,14 +153,49 @@ def make_user() -> User:
     )
 
 
+def test_openai_answer_service_builds_messages_with_history() -> None:
+    """Prompt messages should include system, previous turns, then current grounded question."""
+    chat_history = [
+        ChatMessage(
+            id=uuid.uuid4(),
+            session_id=uuid.uuid4(),
+            role=ChatMessageRole.USER,
+            content="Earlier question",
+        ),
+        ChatMessage(
+            id=uuid.uuid4(),
+            session_id=uuid.uuid4(),
+            role=ChatMessageRole.ASSISTANT,
+            content="Earlier answer",
+        ),
+    ]
+
+    messages = OpenAIChatAnswerService._build_messages(
+        question="Current question",
+        context="[Source 1] Policy\nPolicy text",
+        chat_history=chat_history,
+    )
+
+    assert [message["role"] for message in messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert messages[-1]["content"] == (
+        "Context:\n[Source 1] Policy\nPolicy text\n\nQuestion:\nCurrent question"
+    )
+
+
 @pytest.mark.anyio
 async def test_chat_service_creates_session_and_records_answer() -> None:
     """Ask should create session, store messages, citations, and token usage."""
     repository = FakeChatRepository()
+    answer_service = FakeAnswerService()
     service = ChatService(
         chat_repository=repository,  # type: ignore[arg-type]
         retrieval_service=FakeRetrievalService(),  # type: ignore[arg-type]
-        answer_service=FakeAnswerService(),  # type: ignore[arg-type]
+        answer_service=answer_service,  # type: ignore[arg-type]
         settings=Settings(rag_top_k=5),
     )
 
@@ -167,6 +216,50 @@ async def test_chat_service_creates_session_and_records_answer() -> None:
     assert repository.token_usage_records[0]["output_tokens"] == 7
     assert repository.token_usage_records[0]["embedding_tokens"] == 4
     assert answer.total_tokens == 22
+    assert answer_service.chat_history == []
+
+
+@pytest.mark.anyio
+async def test_chat_service_passes_existing_session_history_to_answer_service() -> None:
+    """Continuing a session should include prior messages in the model prompt."""
+    repository = FakeChatRepository()
+    user = make_user()
+    existing_session = ChatSession(id=uuid.uuid4(), user_id=user.id, title="Existing")
+    repository.sessions[existing_session.id] = existing_session
+    repository.messages = [
+        ChatMessage(
+            id=uuid.uuid4(),
+            session_id=existing_session.id,
+            role=ChatMessageRole.USER,
+            content="Earlier question",
+        ),
+        ChatMessage(
+            id=uuid.uuid4(),
+            session_id=existing_session.id,
+            role=ChatMessageRole.ASSISTANT,
+            content="Earlier answer",
+        ),
+    ]
+    answer_service = FakeAnswerService()
+    service = ChatService(
+        chat_repository=repository,  # type: ignore[arg-type]
+        retrieval_service=FakeRetrievalService(),  # type: ignore[arg-type]
+        answer_service=answer_service,  # type: ignore[arg-type]
+        settings=Settings(chat_history_messages_limit=10),
+    )
+
+    await service.ask(
+        user=user,
+        question="Follow up?",
+        session_id=existing_session.id,
+        top_k=None,
+    )
+
+    assert answer_service.chat_history is not None
+    assert [message.content for message in answer_service.chat_history] == [
+        "Earlier question",
+        "Earlier answer",
+    ]
 
 
 @pytest.mark.anyio
