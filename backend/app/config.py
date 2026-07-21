@@ -104,7 +104,8 @@ class Settings(BaseSettings):
         default=".pdf", description="Comma-separated allowed extensions"
     )
     upload_dir: str = Field(
-        default="storage/uploads/rag", description="Local directory for uploaded RAG PDFs"
+        default="backend/storage/uploads/rag",
+        description="Local directory for uploaded RAG PDFs",
     )
 
     @property
@@ -127,7 +128,7 @@ class Settings(BaseSettings):
         upload_path = Path(self.upload_dir)
         if upload_path.is_absolute():
             return upload_path
-        return Path(__file__).resolve().parents[1] / upload_path
+        return Path(__file__).resolve().parents[2] / upload_path
 
     # ── Semantic Cache ───────────────────────────────────────────────────────
     semantic_cache_threshold: float = Field(
@@ -139,6 +140,7 @@ class Settings(BaseSettings):
     rag_chunk_size: int = Field(default=512, description="Text chunk size in tokens")
     rag_chunk_overlap: int = Field(default=50, description="Overlap between chunks")
     rag_top_k: int = Field(default=5, description="Number of retrieved chunks")
+    rag_embedding_batch_size: int = Field(default=100, description="Embedding batch size")
 
     # ── CORS ──────────────────────────────────────────────────────────────────
     cors_origins: str = Field(

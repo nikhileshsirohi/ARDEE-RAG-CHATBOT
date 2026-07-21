@@ -8,6 +8,7 @@ from app.core.exceptions import NotFoundError
 from app.models.rag import RagDocument
 from app.models.user import User
 from app.repositories.rag_document import RagDocumentRepository
+from app.services.pdf_ingestion import PdfIngestionService
 from app.services.pdf_storage import PdfStorageService
 
 
@@ -18,9 +19,11 @@ class RagDocumentService:
         self,
         repository: RagDocumentRepository,
         storage_service: PdfStorageService,
+        ingestion_service: PdfIngestionService,
     ) -> None:
         self.repository = repository
         self.storage_service = storage_service
+        self.ingestion_service = ingestion_service
 
     async def upload_pdf(self, *, title: str, file: UploadFile, uploaded_by: User) -> RagDocument:
         """Store a PDF and create its document record."""
@@ -36,7 +39,8 @@ class RagDocumentService:
         )
 
         try:
-            return await self.repository.create(document)
+            created_document = await self.repository.create(document)
+            return await self.ingestion_service.ingest(created_document)
         except Exception:
             await self.storage_service.delete_path(stored_pdf.storage_path)
             raise
@@ -64,6 +68,7 @@ class RagDocumentService:
                 file_size_bytes=stored_pdf.file_size_bytes,
                 checksum_sha256=stored_pdf.checksum_sha256,
             )
+            updated_document = await self.ingestion_service.ingest(updated_document)
         except Exception:
             await self.storage_service.delete_path(stored_pdf.storage_path)
             raise

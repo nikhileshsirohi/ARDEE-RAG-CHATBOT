@@ -10,6 +10,12 @@ from app.config import get_settings
 from app.models.user import User, UserRole
 from app.repositories.rag_document import RagDocumentRepository
 from app.schemas.rag import RagDocumentResponse, RagDocumentUpdate
+from app.services.pdf_ingestion import (
+    LlamaIndexChunker,
+    OpenAIEmbeddingService,
+    PdfIngestionService,
+    PdfTextExtractor,
+)
 from app.services.pdf_storage import PdfStorageService
 from app.services.rag_document import RagDocumentService
 
@@ -21,9 +27,16 @@ AdminDep = Annotated[User, Depends(RequireRole(UserRole.ADMIN))]
 def get_document_service(session: SessionDep) -> RagDocumentService:
     """Build document service from request-scoped dependencies."""
     settings = get_settings()
+    repository = RagDocumentRepository(session)
     return RagDocumentService(
-        repository=RagDocumentRepository(session),
+        repository=repository,
         storage_service=PdfStorageService(settings),
+        ingestion_service=PdfIngestionService(
+            repository=repository,
+            extractor=PdfTextExtractor(),
+            chunker=LlamaIndexChunker(settings),
+            embedding_service=OpenAIEmbeddingService(settings),
+        ),
     )
 
 

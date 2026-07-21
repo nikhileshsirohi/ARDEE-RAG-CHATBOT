@@ -35,6 +35,11 @@ dependencies = [
 
     # --- HTTP ---
     "httpx>=0.28.0",
+
+    # --- RAG / AI ---
+    "llama-index-core>=0.13.0",
+    "openai>=1.97.0",
+    "pypdf>=5.9.0",
 ]
 
 [project.optional-dependencies]

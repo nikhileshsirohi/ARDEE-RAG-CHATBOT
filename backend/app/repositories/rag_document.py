@@ -78,6 +78,41 @@ class RagDocumentRepository:
         await self.session.refresh(document)
         return document
 
+    async def mark_processing(self, document: RagDocument) -> RagDocument:
+        """Mark a document as currently being ingested."""
+        document.status = RagDocumentStatus.PROCESSING
+        document.error_message = None
+        await self.session.flush()
+        await self.session.refresh(document)
+        return document
+
+    async def complete_ingestion(
+        self,
+        document: RagDocument,
+        *,
+        chunks: list[DocumentChunk],
+        page_count: int,
+    ) -> RagDocument:
+        """Persist chunks and mark a document ready for retrieval."""
+        self.session.add_all(chunks)
+        document.status = RagDocumentStatus.READY
+        document.page_count = page_count
+        document.chunk_count = len(chunks)
+        document.error_message = None
+        document.processed_at = datetime.now(UTC)
+        await self.session.flush()
+        await self.session.refresh(document)
+        return document
+
+    async def mark_failed(self, document: RagDocument, *, error_message: str) -> RagDocument:
+        """Mark ingestion failure without deleting the admin-uploaded PDF."""
+        document.status = RagDocumentStatus.FAILED
+        document.error_message = error_message[:4000]
+        document.processed_at = None
+        await self.session.flush()
+        await self.session.refresh(document)
+        return document
+
     async def soft_delete(self, document: RagDocument) -> RagDocument:
         """Soft-delete a document so audit history remains intact."""
         document.deleted_at = datetime.now(UTC)
