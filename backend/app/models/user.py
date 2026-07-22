@@ -51,5 +51,6 @@ class User(Base):
     )
 
     documents = relationship("RagDocument", back_populates="uploaded_by")
+    bots = relationship("Bot", back_populates="created_by")
     chat_sessions = relationship("ChatSession", back_populates="user")
     token_usage_records = relationship("TokenUsage", back_populates="user")

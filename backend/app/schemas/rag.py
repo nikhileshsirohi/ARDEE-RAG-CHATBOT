@@ -9,6 +9,46 @@ from app.models.rag import ChatMessageRole, RagDocumentStatus
 from app.models.user import UserRole
 
 
+class BotCreate(BaseModel):
+    """Admin request body for creating a bot."""
+
+    name: str = Field(..., min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=1024)
+    system_prompt: str = Field(..., min_length=1, max_length=8000)
+
+
+class BotUpdate(BaseModel):
+    """Admin request body for updating a bot (all fields optional)."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=1024)
+    system_prompt: str | None = Field(default=None, min_length=1, max_length=8000)
+    is_active: bool | None = None
+
+
+class BotResponse(BaseModel):
+    """Bot summary response for listing and detail views."""
+
+    id: uuid.UUID
+    name: str
+    description: str | None
+    system_prompt: str
+    is_active: bool
+    created_by_id: uuid.UUID | None
+    document_count: int = 0
+    ready_document_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class BotDetailResponse(BotResponse):
+    """Bot detail response including its knowledge-base documents."""
+
+    documents: list["RagDocumentResponse"] = Field(default_factory=list)
+
+
 class RagDocumentCreate(BaseModel):
     """Metadata required when an admin uploads a PDF."""
 
@@ -29,6 +69,7 @@ class RagDocumentResponse(BaseModel):
     """Admin-facing document response."""
 
     id: uuid.UUID
+    bot_id: uuid.UUID | None
     title: str
     original_filename: str
     status: RagDocumentStatus
@@ -57,9 +98,15 @@ class ChatSessionUpdate(BaseModel):
 
 
 class ChatAskRequest(BaseModel):
-    """Authenticated request to ask the RAG chatbot."""
+    """Authenticated request to ask the RAG chatbot.
+
+    ``bot_id`` selects which bot answers. It is required when starting a new
+    session (``session_id`` omitted); when continuing a session the bot is
+    inferred from the session.
+    """
 
     question: str = Field(..., min_length=1, max_length=4000)
+    bot_id: uuid.UUID | None = None
     session_id: uuid.UUID | None = None
     top_k: int | None = Field(default=None, ge=1, le=20)
 
@@ -84,11 +131,13 @@ class ChatSessionResponse(BaseModel):
 
     id: uuid.UUID
     user_id: uuid.UUID
+    bot_id: uuid.UUID | None
     title: str
     last_message_at: datetime | None
     is_archived: bool
     created_at: datetime
     updated_at: datetime
+    total_tokens: int = Field(default=0, ge=0)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -97,6 +146,7 @@ class RagSearchRequest(BaseModel):
     """Authenticated RAG retrieval request."""
 
     query: str = Field(..., min_length=1, max_length=4000)
+    bot_id: uuid.UUID
     top_k: int | None = Field(default=None, ge=1, le=20)
 
 
@@ -172,7 +222,21 @@ class SessionTokenUsageMetric(BaseModel):
 
     session_id: uuid.UUID
     title: str
+    bot_id: uuid.UUID | None = None
+    bot_name: str | None = None
     last_message_at: datetime | None
+    input_tokens: int = Field(..., ge=0)
+    output_tokens: int = Field(..., ge=0)
+    embedding_tokens: int = Field(..., ge=0)
+    total_tokens: int = Field(..., ge=0)
+    request_count: int = Field(..., ge=0)
+
+
+class BotTokenUsageMetric(BaseModel):
+    """Admin dashboard aggregate by bot."""
+
+    bot_id: uuid.UUID | None
+    name: str
     input_tokens: int = Field(..., ge=0)
     output_tokens: int = Field(..., ge=0)
     embedding_tokens: int = Field(..., ge=0)
@@ -190,3 +254,6 @@ class MyTokenUsageSummary(BaseModel):
     request_count: int = Field(..., ge=0)
     session_count: int = Field(..., ge=0)
     sessions: list[SessionTokenUsageMetric]
+
+
+BotDetailResponse.model_rebuild()

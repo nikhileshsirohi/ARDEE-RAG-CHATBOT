@@ -12,6 +12,7 @@ from app.api.dependencies.auth import ActiveUserDep, SessionDep
 from app.config import get_settings
 from app.core.exceptions import NotFoundError
 from app.core.redis import get_redis_client
+from app.repositories.bot import BotRepository
 from app.repositories.chat import ChatRepository
 from app.repositories.metrics import MetricsRepository
 from app.repositories.rag_retrieval import RagRetrievalRepository
@@ -42,6 +43,7 @@ def get_chat_service(session: SessionDep) -> ChatService:
     )
     return ChatService(
         chat_repository=ChatRepository(session),
+        bot_repository=BotRepository(session),
         retrieval_service=retrieval_service,
         answer_service=OpenAIChatAnswerService(settings),
         settings=settings,
@@ -78,6 +80,7 @@ async def ask_chatbot(
     answer = await service.ask(
         user=current_user,
         question=request.question,
+        bot_id=request.bot_id,
         session_id=request.session_id,
         top_k=request.top_k,
     )
@@ -108,6 +111,7 @@ async def ask_chatbot_stream(
             async for event in service.ask_stream(
                 user=current_user,
                 question=request.question,
+                bot_id=request.bot_id,
                 session_id=request.session_id,
                 top_k=request.top_k,
             ):
@@ -150,14 +154,32 @@ async def list_my_chat_sessions(
     repository: ChatRepositoryDep,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
+    bot_id: Annotated[uuid.UUID | None, Query()] = None,
 ) -> list[ChatSessionResponse]:
-    """List only sessions owned by the authenticated user."""
+    """List only sessions owned by the authenticated user, optionally per bot."""
     sessions = await repository.list_user_sessions(
         user_id=current_user.id,
         limit=limit,
         offset=offset,
+        bot_id=bot_id,
     )
-    return [ChatSessionResponse.model_validate(session) for session in sessions]
+    token_totals = await repository.sum_tokens_by_session(
+        session_ids=[session.id for session in sessions]
+    )
+    return [
+        ChatSessionResponse(
+            id=session.id,
+            user_id=session.user_id,
+            bot_id=session.bot_id,
+            title=session.title,
+            last_message_at=session.last_message_at,
+            is_archived=session.is_archived,
+            created_at=session.created_at,
+            updated_at=session.updated_at,
+            total_tokens=token_totals.get(session.id, 0),
+        )
+        for session in sessions
+    ]
 
 
 @router.get(
@@ -185,8 +207,12 @@ async def get_my_chat_session(
         limit=limit,
         offset=offset,
     )
+    token_totals = await repository.sum_tokens_by_session(session_ids=[chat_session.id])
+    session_payload = ChatSessionResponse.model_validate(chat_session).model_copy(
+        update={"total_tokens": token_totals.get(chat_session.id, 0)}
+    )
     return ChatSessionDetailResponse(
-        session=ChatSessionResponse.model_validate(chat_session),
+        session=session_payload,
         messages=[ChatMessageResponse.model_validate(message) for message in messages],
     )
 

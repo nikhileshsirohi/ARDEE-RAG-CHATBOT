@@ -35,7 +35,9 @@ async def search_rag_chunks(
 ) -> RagSearchResponse:
     """Search ingested RAG chunks. Any active user can retrieve context."""
     normalized_query = " ".join(request.query.split())
-    results = await service.search(query=normalized_query, top_k=request.top_k)
+    results = await service.search(
+        query=normalized_query, bot_id=request.bot_id, top_k=request.top_k
+    )
 
     return RagSearchResponse(
         query=normalized_query,

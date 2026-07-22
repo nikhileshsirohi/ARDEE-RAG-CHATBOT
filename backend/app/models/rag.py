@@ -47,11 +47,43 @@ class ChatMessageRole(StrEnum):
     SYSTEM = "SYSTEM"
 
 
+class Bot(Base):
+    """An admin-configured chatbot backed by its own knowledge base.
+
+    A bot bundles a system prompt (its persona and instructions) with the set
+    of PDF documents that form its knowledge base. Admins create/update/delete
+    bots; users chat with them. Retrieval, chat sessions, and token usage are
+    all scoped to a single bot.
+    """
+
+    __tablename__ = "bots"
+
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", nullable=False
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+    created_by = relationship("User", back_populates="bots")
+    documents = relationship(
+        "RagDocument", back_populates="bot", cascade="all, delete-orphan"
+    )
+    chat_sessions = relationship("ChatSession", back_populates="bot")
+
+
 class RagDocument(Base):
     """PDF document uploaded and managed by admins."""
 
     __tablename__ = "rag_documents"
 
+    bot_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("bots.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     storage_path: Mapped[str] = mapped_column(String(1024), unique=True, nullable=False)
@@ -77,7 +109,17 @@ class RagDocument(Base):
     )
 
     uploaded_by = relationship("User", back_populates="documents")
+    bot = relationship("Bot", back_populates="documents")
     chunks = relationship("DocumentChunk", back_populates="document", cascade="all, delete-orphan")
+    __table_args__ = (
+        Index(
+            "uq_rag_documents_active_bot_checksum",
+            "bot_id",
+            "checksum_sha256",
+            unique=True,
+            postgresql_where=deleted_at.is_(None),
+        ),
+    )
 
 
 class DocumentChunk(Base):
@@ -121,6 +163,9 @@ class ChatSession(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    bot_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("bots.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     title: Mapped[str] = mapped_column(String(255), default="New chat", nullable=False)
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_archived: Mapped[bool] = mapped_column(
@@ -128,6 +173,7 @@ class ChatSession(Base):
     )
 
     user = relationship("User", back_populates="chat_sessions")
+    bot = relationship("Bot", back_populates="chat_sessions")
     messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan")
     token_usage_records = relationship("TokenUsage", back_populates="session")
 
@@ -163,10 +209,14 @@ class TokenUsage(Base):
     __table_args__ = (
         Index("ix_token_usage_user_created_at", "user_id", "created_at"),
         Index("ix_token_usage_session_created_at", "session_id", "created_at"),
+        Index("ix_token_usage_bot_created_at", "bot_id", "created_at"),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    bot_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("bots.id", ondelete="SET NULL"), nullable=True
     )
     session_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="SET NULL"), nullable=True

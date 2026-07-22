@@ -8,9 +8,10 @@ from sqlalchemy import Select, and_, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.types import Date
 
-from app.models.rag import ChatSession, TokenUsage
+from app.models.rag import Bot, ChatSession, TokenUsage
 from app.models.user import User
 from app.schemas.rag import (
+    BotTokenUsageMetric,
     DailyTokenUsageMetric,
     MyTokenUsageSummary,
     SessionTokenUsageMetric,
@@ -82,18 +83,74 @@ class MetricsRepository:
             for row in result.mappings().all()
         ]
 
+    async def list_bot_token_usage(
+        self,
+        *,
+        start_at: datetime | None,
+        end_at: datetime | None,
+        limit: int,
+        offset: int,
+    ) -> list[BotTokenUsageMetric]:
+        """Aggregate token usage by bot, including bots with zero usage."""
+        join_conditions = [TokenUsage.bot_id == Bot.id]
+        if start_at is not None:
+            join_conditions.append(TokenUsage.created_at >= start_at)
+        if end_at is not None:
+            join_conditions.append(TokenUsage.created_at <= end_at)
+
+        input_tokens = func.coalesce(func.sum(TokenUsage.input_tokens), 0).label("input_tokens")
+        output_tokens = func.coalesce(func.sum(TokenUsage.output_tokens), 0).label("output_tokens")
+        embedding_tokens = func.coalesce(func.sum(TokenUsage.embedding_tokens), 0).label(
+            "embedding_tokens"
+        )
+        total_tokens = func.coalesce(func.sum(TokenUsage.total_tokens), 0).label("total_tokens")
+        request_count = func.count(TokenUsage.id).label("request_count")
+
+        stmt: Select[Any] = (
+            select(
+                Bot.id.label("bot_id"),
+                Bot.name,
+                input_tokens,
+                output_tokens,
+                embedding_tokens,
+                total_tokens,
+                request_count,
+            )
+            .outerjoin(TokenUsage, and_(*join_conditions))
+            .where(Bot.deleted_at.is_(None))
+            .group_by(Bot.id, Bot.name, Bot.created_at)
+            .order_by(total_tokens.desc(), Bot.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+
+        result = await self.session.execute(stmt)
+        return [
+            BotTokenUsageMetric(
+                bot_id=row["bot_id"],
+                name=row["name"],
+                input_tokens=int(row["input_tokens"]),
+                output_tokens=int(row["output_tokens"]),
+                embedding_tokens=int(row["embedding_tokens"]),
+                total_tokens=int(row["total_tokens"]),
+                request_count=int(row["request_count"]),
+            )
+            for row in result.mappings().all()
+        ]
+
     async def list_daily_token_usage(
         self,
         *,
         start_at: datetime,
         end_at: datetime,
         user_id: uuid.UUID | None,
+        bot_id: uuid.UUID | None = None,
     ) -> list[DailyTokenUsageMetric]:
         """Aggregate token usage into per-day buckets for the usage chart.
 
-        When ``user_id`` is provided the buckets are scoped to that user;
-        otherwise they span every user. Days with no usage are omitted — the
-        caller fills gaps so the chart always shows a full window.
+        When ``user_id``/``bot_id`` are provided the buckets are scoped
+        accordingly; otherwise they span every user. Days with no usage are
+        omitted — the caller fills gaps so the chart always shows a full window.
         """
         conditions = [
             TokenUsage.created_at >= start_at,
@@ -101,6 +158,8 @@ class MetricsRepository:
         ]
         if user_id is not None:
             conditions.append(TokenUsage.user_id == user_id)
+        if bot_id is not None:
+            conditions.append(TokenUsage.bot_id == bot_id)
 
         day = cast(TokenUsage.created_at, Date).label("day")
 
@@ -156,6 +215,8 @@ class MetricsRepository:
             select(
                 ChatSession.id.label("session_id"),
                 ChatSession.title,
+                ChatSession.bot_id,
+                Bot.name.label("bot_name"),
                 ChatSession.last_message_at,
                 input_tokens.label("input_tokens"),
                 output_tokens.label("output_tokens"),
@@ -164,8 +225,15 @@ class MetricsRepository:
                 request_count.label("request_count"),
             )
             .join(TokenUsage, TokenUsage.session_id == ChatSession.id)
+            .outerjoin(Bot, Bot.id == ChatSession.bot_id)
             .where(ChatSession.user_id == user_id, ChatSession.is_archived.is_(False))
-            .group_by(ChatSession.id, ChatSession.title, ChatSession.last_message_at)
+            .group_by(
+                ChatSession.id,
+                ChatSession.title,
+                ChatSession.bot_id,
+                Bot.name,
+                ChatSession.last_message_at,
+            )
             .order_by(total_tokens.desc(), ChatSession.last_message_at.desc().nullslast())
         )
         session_rows = (await self.session.execute(sessions_stmt)).mappings().all()
@@ -174,6 +242,8 @@ class MetricsRepository:
             SessionTokenUsageMetric(
                 session_id=row["session_id"],
                 title=row["title"],
+                bot_id=row["bot_id"],
+                bot_name=row["bot_name"],
                 last_message_at=row["last_message_at"],
                 input_tokens=int(row["input_tokens"]),
                 output_tokens=int(row["output_tokens"]),

@@ -18,6 +18,7 @@ class FakeRetrievalRepository:
         self.query_embedding: list[float] | None = None
         self.query_text: str | None = None
         self.limit: int | None = None
+        self.bot_id: uuid.UUID | None = None
 
     def _results(self) -> list[HybridSearchResult]:
         return [
@@ -40,9 +41,11 @@ class FakeRetrievalRepository:
         *,
         query_embedding: list[float],
         limit: int,
+        bot_id: uuid.UUID,
     ) -> list[HybridSearchResult]:
         self.query_embedding = query_embedding
         self.limit = limit
+        self.bot_id = bot_id
         return self._results()
 
     async def hybrid_search(
@@ -51,10 +54,12 @@ class FakeRetrievalRepository:
         query_text: str,
         query_embedding: list[float],
         limit: int,
+        bot_id: uuid.UUID,
     ) -> list[HybridSearchResult]:
         self.query_text = query_text
         self.query_embedding = query_embedding
         self.limit = limit
+        self.bot_id = bot_id
         return self._results()
 
 
@@ -82,7 +87,7 @@ async def test_retrieval_service_normalizes_query_and_uses_default_top_k() -> No
         settings=Settings(rag_top_k=7),
     )
 
-    results = await service.search(query="  employee   policy  ")
+    results = await service.search(query="  employee   policy  ", bot_id=uuid.uuid4())
 
     assert len(results) == 1
     assert repository.limit == 7
@@ -99,7 +104,7 @@ async def test_retrieval_service_allows_request_top_k_override() -> None:
         settings=Settings(rag_top_k=7),
     )
 
-    await service.search(query="policy", top_k=3)
+    await service.search(query="policy", bot_id=uuid.uuid4(), top_k=3)
 
     assert repository.limit == 3
 
@@ -114,7 +119,7 @@ async def test_retrieval_service_rejects_blank_query() -> None:
     )
 
     with pytest.raises(BadRequestError, match="Search query is required"):
-        await service.search(query="   ")
+        await service.search(query="   ", bot_id=uuid.uuid4())
 
 
 def test_rag_search_route_is_registered() -> None:

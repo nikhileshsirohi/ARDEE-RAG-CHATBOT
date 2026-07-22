@@ -1,5 +1,7 @@
 """Embedding retrieval service for RAG."""
 
+import uuid
+
 from app.config import Settings
 from app.core.exceptions import BadRequestError
 from app.repositories.rag_retrieval import HybridSearchResult, RagRetrievalRepository
@@ -19,7 +21,13 @@ class RagRetrievalService:
         self.embedding_service = embedding_service
         self.settings = settings
 
-    async def search(self, *, query: str, top_k: int | None = None) -> list[HybridSearchResult]:
+    async def search(
+        self,
+        *,
+        query: str,
+        bot_id: uuid.UUID,
+        top_k: int | None = None,
+    ) -> list[HybridSearchResult]:
         """Embed a query and retrieve the best matching chunks via hybrid search."""
         normalized_query = " ".join(query.split())
         if not normalized_query:
@@ -29,6 +37,7 @@ class RagRetrievalService:
         return await self.search_hybrid(
             query_text=normalized_query,
             query_embedding=query_embedding,
+            bot_id=bot_id,
             top_k=top_k,
         )
 
@@ -45,6 +54,7 @@ class RagRetrievalService:
         self,
         *,
         query_embedding: list[float],
+        bot_id: uuid.UUID,
         top_k: int | None = None,
     ) -> list[HybridSearchResult]:
         """Retrieve chunks using an existing query embedding (vector only)."""
@@ -52,6 +62,7 @@ class RagRetrievalService:
         return await self.repository.vector_search(
             query_embedding=query_embedding,
             limit=limit,
+            bot_id=bot_id,
         )
 
     async def search_hybrid(
@@ -59,6 +70,7 @@ class RagRetrievalService:
         *,
         query_text: str,
         query_embedding: list[float],
+        bot_id: uuid.UUID,
         top_k: int | None = None,
     ) -> list[HybridSearchResult]:
         """Retrieve chunks by fusing vector similarity and keyword relevance."""
@@ -67,4 +79,5 @@ class RagRetrievalService:
             query_text=query_text,
             query_embedding=query_embedding,
             limit=limit,
+            bot_id=bot_id,
         )

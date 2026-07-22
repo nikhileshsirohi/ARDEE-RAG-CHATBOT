@@ -128,15 +128,30 @@ class Settings(BaseSettings):
 
     @property
     def upload_dir_path(self) -> Path:
-        """Resolve upload directory relative to the backend root when needed."""
+        """Resolve upload directory for both local and Docker layouts.
+
+        Local layout: ``backend/app/config.py`` → project root is parents[2], and
+        ``UPLOAD_DIR=backend/storage/...`` resolves under the repo.
+
+        Docker layout: ``/app/app/config.py`` → parents[2] is ``/``, so we resolve
+        from the install root (``/app``) instead. That matches the compose volume
+        at ``/app/backend/storage/uploads/rag``.
+        """
         upload_path = Path(self.upload_dir)
         if upload_path.is_absolute():
             return upload_path
-        return Path(__file__).resolve().parents[2] / upload_path
+
+        config_file = Path(__file__).resolve()
+        project_root = config_file.parents[2]
+        # In the image, config lives at /app/app/config.py so parents[2] is "/".
+        if project_root == project_root.anchor:
+            install_root = config_file.parents[1].parent  # /app
+            return (install_root / upload_path).resolve()
+        return (project_root / upload_path).resolve()
 
     # ── Semantic Cache ───────────────────────────────────────────────────────
     semantic_cache_threshold: float = Field(
-        default=0.95, description="Cosine similarity threshold for cache hit"
+        default=0.90, description="Cosine similarity threshold for cache hit"
     )
     semantic_cache_ttl_seconds: int = Field(default=3600, description="Cache entry TTL in seconds")
 
@@ -152,6 +167,10 @@ class Settings(BaseSettings):
     rag_min_keyword_score: float = Field(
         default=0.1,
         description="Minimum keyword (ts_rank_cd) score that also qualifies a chunk as relevant",
+    )
+    rag_min_hybrid_score: float = Field(
+        default=0.3,
+        description="Minimum combined retrieval confidence required before calling the LLM",
     )
     chat_history_messages_limit: int = Field(
         default=10,

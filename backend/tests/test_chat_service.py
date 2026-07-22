@@ -8,16 +8,41 @@ import pytest
 from app.config import Settings
 from app.core.exceptions import NotFoundError
 from app.main import create_app
-from app.models.rag import ChatMessage, ChatMessageRole, ChatSession
+from app.models.rag import Bot, ChatMessage, ChatMessageRole, ChatSession
 from app.models.user import User, UserRole
 from app.repositories.rag_retrieval import HybridSearchResult
 from app.services.chat import (
+    LOW_CONFIDENCE_ANSWER,
     AnswerStreamChunk,
     ChatService,
     GeneratedAnswer,
     OpenAIChatAnswerService,
 )
 from app.services.semantic_cache import SemanticCacheHit
+
+BOT_ID = uuid.uuid4()
+
+
+def make_bot() -> Bot:
+    """Create a test bot model."""
+    return Bot(
+        id=BOT_ID,
+        name="Test Bot",
+        description="A test bot",
+        system_prompt="You are a test bot.",
+        is_active=True,
+    )
+
+
+class FakeBotRepository:
+    """In-memory fake returning a single active bot."""
+
+    def __init__(self, bot: Bot | None = None) -> None:
+        self.bot = bot or make_bot()
+
+    async def get_active_by_id(self, bot_id: uuid.UUID) -> Bot | None:
+        _ = bot_id
+        return self.bot
 
 
 class FakeChatRepository:
@@ -29,8 +54,12 @@ class FakeChatRepository:
         self.token_usage_records: list[dict[str, object]] = []
         self.recent_messages_call_count = 0
 
-    async def create_session(self, *, user_id: uuid.UUID, title: str) -> ChatSession:
-        chat_session = ChatSession(id=uuid.uuid4(), user_id=user_id, title=title)
+    async def create_session(
+        self, *, user_id: uuid.UUID, title: str, bot_id: uuid.UUID | None = None
+    ) -> ChatSession:
+        chat_session = ChatSession(
+            id=uuid.uuid4(), user_id=user_id, bot_id=bot_id, title=title
+        )
         self.sessions[chat_session.id] = chat_session
         return chat_session
 
@@ -51,11 +80,14 @@ class FakeChatRepository:
         user_id: uuid.UUID,
         limit: int,
         offset: int,
+        bot_id: uuid.UUID | None = None,
     ) -> list[ChatSession]:
         sessions = [
             session
             for session in self.sessions.values()
-            if session.user_id == user_id and not session.is_archived
+            if session.user_id == user_id
+            and not session.is_archived
+            and (bot_id is None or session.bot_id == bot_id)
         ]
         return sessions[offset : offset + limit]
 
@@ -119,7 +151,7 @@ class FakeRetrievalService:
         vector_scores: list[float] | None = None,
         keyword_scores: list[float] | None = None,
     ) -> None:
-        self.hybrid_scores = hybrid_scores or [0.04]
+        self.hybrid_scores = hybrid_scores or [0.7]
         self.vector_scores = vector_scores or [0.91 for _score in self.hybrid_scores]
         self.keyword_scores = keyword_scores or [0.5 for _score in self.hybrid_scores]
         self.search_call_count = 0
@@ -133,10 +165,12 @@ class FakeRetrievalService:
         self,
         *,
         query: str,
+        bot_id: uuid.UUID | None = None,
         top_k: int | None = None,
     ) -> list[HybridSearchResult]:
         _ = query
         _ = top_k
+        _ = bot_id
         return await self.search_by_embedding(query_embedding=self.query_embedding, top_k=top_k)
 
     async def search_hybrid(
@@ -144,19 +178,23 @@ class FakeRetrievalService:
         *,
         query_text: str,
         query_embedding: list[float],
+        bot_id: uuid.UUID | None = None,
         top_k: int | None = None,
     ) -> list[HybridSearchResult]:
         _ = query_text
+        _ = bot_id
         return await self.search_by_embedding(query_embedding=query_embedding, top_k=top_k)
 
     async def search_by_embedding(
         self,
         *,
         query_embedding: list[float],
+        bot_id: uuid.UUID | None = None,
         top_k: int | None = None,
     ) -> list[HybridSearchResult]:
         _ = query_embedding
         _ = top_k
+        _ = bot_id
         self.search_call_count += 1
         return [
             HybridSearchResult(
@@ -198,10 +236,12 @@ class FakeAnswerService:
         question: str,
         retrieved_chunks: list[HybridSearchResult],
         chat_history: list[ChatMessage],
+        system_prompt: str = "",
     ) -> GeneratedAnswer:
         self.was_called = True
         self.chat_history = chat_history
         self.retrieved_chunks = retrieved_chunks
+        self.system_prompt = system_prompt
         return GeneratedAnswer(
             answer=f"Answer for {question} with {len(retrieved_chunks)} source",
             input_tokens=11,
@@ -214,9 +254,11 @@ class FakeAnswerService:
         question: str,
         retrieved_chunks: list[HybridSearchResult],
         chat_history: list[ChatMessage],
+        system_prompt: str = "",
     ) -> AsyncIterator[AnswerStreamChunk]:
         self.was_called = True
         self.chat_history = chat_history
+        self.system_prompt = system_prompt
         self.retrieved_chunks = retrieved_chunks
         answer = f"Answer for {question} with {len(retrieved_chunks)} source"
         for word in answer.split(" "):
@@ -233,8 +275,11 @@ class FakeSemanticCacheService:
         self.set_call_count = 0
         self.set_payload: dict[str, object] | None = None
 
-    async def get(self, *, query_embedding: list[float]) -> SemanticCacheHit | None:
+    async def get(
+        self, *, query_embedding: list[float], bot_id: uuid.UUID | None = None
+    ) -> SemanticCacheHit | None:
         _ = query_embedding
+        _ = bot_id
         self.get_call_count += 1
         return self.hit
 
@@ -247,6 +292,7 @@ class FakeSemanticCacheService:
         source_citations: list[dict[str, object]],
         input_tokens: int,
         output_tokens: int,
+        bot_id: uuid.UUID | None = None,
     ) -> None:
         self.set_call_count += 1
         self.set_payload = {
@@ -256,6 +302,7 @@ class FakeSemanticCacheService:
             "source_citations": source_citations,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
+            "bot_id": bot_id,
         }
 
 
@@ -292,6 +339,7 @@ def test_openai_answer_service_builds_messages_with_history() -> None:
         question="Current question",
         context="[Source 1] Policy\nPolicy text",
         chat_history=chat_history,
+        system_prompt="You are a test bot.",
     )
 
     assert [message["role"] for message in messages] == [
@@ -312,6 +360,7 @@ async def test_chat_service_creates_session_and_records_answer() -> None:
     answer_service = FakeAnswerService()
     service = ChatService(
         chat_repository=repository,  # type: ignore[arg-type]
+        bot_repository=FakeBotRepository(),  # type: ignore[arg-type]
         retrieval_service=FakeRetrievalService(),  # type: ignore[arg-type]
         answer_service=answer_service,  # type: ignore[arg-type]
         settings=Settings(rag_top_k=5),
@@ -320,6 +369,7 @@ async def test_chat_service_creates_session_and_records_answer() -> None:
     answer = await service.ask(
         user=make_user(),
         question="  What is   HR policy? ",
+        bot_id=BOT_ID,
         session_id=None,
         top_k=None,
     )
@@ -356,6 +406,7 @@ async def test_chat_service_returns_semantic_cache_hit_without_retrieval_or_llm(
     )
     service = ChatService(
         chat_repository=repository,  # type: ignore[arg-type]
+        bot_repository=FakeBotRepository(),  # type: ignore[arg-type]
         retrieval_service=retrieval_service,  # type: ignore[arg-type]
         answer_service=answer_service,  # type: ignore[arg-type]
         settings=Settings(),
@@ -365,6 +416,7 @@ async def test_chat_service_returns_semantic_cache_hit_without_retrieval_or_llm(
     answer = await service.ask(
         user=make_user(),
         question="What is policy?",
+        bot_id=BOT_ID,
         session_id=None,
         top_k=None,
     )
@@ -391,13 +443,16 @@ async def test_chat_service_stores_successful_answer_in_semantic_cache() -> None
     cache_service = FakeSemanticCacheService()
     service = ChatService(
         chat_repository=repository,  # type: ignore[arg-type]
+        bot_repository=FakeBotRepository(),  # type: ignore[arg-type]
         retrieval_service=FakeRetrievalService(),  # type: ignore[arg-type]
         answer_service=FakeAnswerService(),  # type: ignore[arg-type]
         settings=Settings(),
         semantic_cache_service=cache_service,  # type: ignore[arg-type]
     )
 
-    await service.ask(user=make_user(), question="What is policy?", session_id=None, top_k=None)
+    await service.ask(
+        user=make_user(), question="What is policy?", bot_id=BOT_ID, session_id=None, top_k=None
+    )
 
     assert cache_service.get_call_count == 1
     assert cache_service.set_call_count == 1
@@ -412,6 +467,7 @@ async def test_chat_service_does_not_cache_low_confidence_answer() -> None:
     cache_service = FakeSemanticCacheService()
     service = ChatService(
         chat_repository=FakeChatRepository(),  # type: ignore[arg-type]
+        bot_repository=FakeBotRepository(),  # type: ignore[arg-type]
         # Both signals below threshold → genuinely low confidence.
         retrieval_service=FakeRetrievalService(  # type: ignore[arg-type]
             vector_scores=[0.01], keyword_scores=[0]
@@ -421,7 +477,9 @@ async def test_chat_service_does_not_cache_low_confidence_answer() -> None:
         semantic_cache_service=cache_service,  # type: ignore[arg-type]
     )
 
-    await service.ask(user=make_user(), question="Unknown?", session_id=None, top_k=None)
+    await service.ask(
+        user=make_user(), question="Unknown?", bot_id=BOT_ID, session_id=None, top_k=None
+    )
 
     assert cache_service.get_call_count == 1
     assert cache_service.set_call_count == 0
@@ -432,7 +490,9 @@ async def test_chat_service_passes_existing_session_history_to_answer_service() 
     """Continuing a session should include prior messages in the model prompt."""
     repository = FakeChatRepository()
     user = make_user()
-    existing_session = ChatSession(id=uuid.uuid4(), user_id=user.id, title="Existing")
+    existing_session = ChatSession(
+        id=uuid.uuid4(), user_id=user.id, bot_id=BOT_ID, title="Existing"
+    )
     repository.sessions[existing_session.id] = existing_session
     repository.messages = [
         ChatMessage(
@@ -451,6 +511,7 @@ async def test_chat_service_passes_existing_session_history_to_answer_service() 
     answer_service = FakeAnswerService()
     service = ChatService(
         chat_repository=repository,  # type: ignore[arg-type]
+        bot_repository=FakeBotRepository(),  # type: ignore[arg-type]
         retrieval_service=FakeRetrievalService(),  # type: ignore[arg-type]
         answer_service=answer_service,  # type: ignore[arg-type]
         settings=Settings(chat_history_messages_limit=10),
@@ -475,7 +536,9 @@ async def test_chat_service_uses_only_latest_configured_history_messages() -> No
     """Only latest K previous messages should be passed to the prompt."""
     repository = FakeChatRepository()
     user = make_user()
-    existing_session = ChatSession(id=uuid.uuid4(), user_id=user.id, title="Existing")
+    existing_session = ChatSession(
+        id=uuid.uuid4(), user_id=user.id, bot_id=BOT_ID, title="Existing"
+    )
     repository.sessions[existing_session.id] = existing_session
     repository.messages = [
         ChatMessage(
@@ -489,6 +552,7 @@ async def test_chat_service_uses_only_latest_configured_history_messages() -> No
     answer_service = FakeAnswerService()
     service = ChatService(
         chat_repository=repository,  # type: ignore[arg-type]
+        bot_repository=FakeBotRepository(),  # type: ignore[arg-type]
         retrieval_service=FakeRetrievalService(),  # type: ignore[arg-type]
         answer_service=answer_service,  # type: ignore[arg-type]
         settings=Settings(chat_history_messages_limit=10),
@@ -512,7 +576,9 @@ async def test_chat_service_skips_llm_when_retrieval_confidence_is_low() -> None
     """Low retrieval scores should produce a safe answer without using chat history."""
     repository = FakeChatRepository()
     user = make_user()
-    existing_session = ChatSession(id=uuid.uuid4(), user_id=user.id, title="Existing")
+    existing_session = ChatSession(
+        id=uuid.uuid4(), user_id=user.id, bot_id=BOT_ID, title="Existing"
+    )
     repository.sessions[existing_session.id] = existing_session
     repository.messages = [
         ChatMessage(
@@ -525,6 +591,7 @@ async def test_chat_service_skips_llm_when_retrieval_confidence_is_low() -> None
     answer_service = FakeAnswerService()
     service = ChatService(
         chat_repository=repository,  # type: ignore[arg-type]
+        bot_repository=FakeBotRepository(),  # type: ignore[arg-type]
         retrieval_service=FakeRetrievalService(  # type: ignore[arg-type]
             hybrid_scores=[0],
             vector_scores=[0.08631352608679232],
@@ -562,15 +629,45 @@ async def test_chat_service_skips_llm_when_retrieval_confidence_is_low() -> None
 
 
 @pytest.mark.anyio
+async def test_chat_service_skips_llm_when_hybrid_confidence_is_low() -> None:
+    """A weak combined score should block chunks even when vector passes."""
+    answer_service = FakeAnswerService()
+    service = ChatService(
+        chat_repository=FakeChatRepository(),  # type: ignore[arg-type]
+        bot_repository=FakeBotRepository(),  # type: ignore[arg-type]
+        retrieval_service=FakeRetrievalService(  # type: ignore[arg-type]
+            hybrid_scores=[0.24],
+            vector_scores=[0.35],
+            keyword_scores=[0],
+        ),
+        answer_service=answer_service,  # type: ignore[arg-type]
+        settings=Settings(rag_min_vector_score=0.25, rag_min_hybrid_score=0.3),
+    )
+
+    answer = await service.ask(
+        user=make_user(),
+        question="What is the lunch menu next Friday?",
+        bot_id=BOT_ID,
+        session_id=None,
+        top_k=None,
+    )
+
+    assert answer.answer == LOW_CONFIDENCE_ANSWER
+    assert answer.source_citations == []
+    assert answer_service.was_called is False
+
+
+@pytest.mark.anyio
 async def test_chat_service_filters_low_score_chunks_before_calling_llm() -> None:
-    """Only chunks meeting vector threshold should reach the LLM prompt."""
+    """Only chunks meeting signal and hybrid thresholds should reach the LLM prompt."""
     repository = FakeChatRepository()
     user = make_user()
     answer_service = FakeAnswerService()
     service = ChatService(
         chat_repository=repository,  # type: ignore[arg-type]
+        bot_repository=FakeBotRepository(),  # type: ignore[arg-type]
         retrieval_service=FakeRetrievalService(  # type: ignore[arg-type]
-            hybrid_scores=[0, 0],
+            hybrid_scores=[0.1, 0.4],
             vector_scores=[0.1, 0.31],
             keyword_scores=[0, 0],
         ),
@@ -581,6 +678,7 @@ async def test_chat_service_filters_low_score_chunks_before_calling_llm() -> Non
     answer = await service.ask(
         user=user,
         question="Relevant enough?",
+        bot_id=BOT_ID,
         session_id=None,
         top_k=None,
     )
@@ -604,6 +702,7 @@ async def test_chat_service_rejects_session_owned_by_another_user() -> None:
     repository.sessions[existing_session.id] = existing_session
     service = ChatService(
         chat_repository=repository,  # type: ignore[arg-type]
+        bot_repository=FakeBotRepository(),  # type: ignore[arg-type]
         retrieval_service=FakeRetrievalService(),  # type: ignore[arg-type]
         answer_service=FakeAnswerService(),  # type: ignore[arg-type]
         settings=Settings(),
@@ -648,6 +747,7 @@ async def test_chat_service_streams_answer_tokens_and_records_usage() -> None:
     answer_service = FakeAnswerService()
     service = ChatService(
         chat_repository=repository,  # type: ignore[arg-type]
+        bot_repository=FakeBotRepository(),  # type: ignore[arg-type]
         retrieval_service=FakeRetrievalService(),  # type: ignore[arg-type]
         answer_service=answer_service,  # type: ignore[arg-type]
         settings=Settings(rag_top_k=3),
@@ -658,6 +758,7 @@ async def test_chat_service_streams_answer_tokens_and_records_usage() -> None:
         async for event in service.ask_stream(
             user=make_user(),
             question="  What is   HR policy? ",
+            bot_id=BOT_ID,
             session_id=None,
             top_k=None,
         )
@@ -688,6 +789,7 @@ async def test_chat_service_answers_greeting_without_retrieval() -> None:
     answer_service = FakeAnswerService()
     service = ChatService(
         chat_repository=repository,  # type: ignore[arg-type]
+        bot_repository=FakeBotRepository(),  # type: ignore[arg-type]
         retrieval_service=retrieval,  # type: ignore[arg-type]
         answer_service=answer_service,  # type: ignore[arg-type]
         settings=Settings(rag_top_k=3),
@@ -696,6 +798,7 @@ async def test_chat_service_answers_greeting_without_retrieval() -> None:
     answer = await service.ask(
         user=make_user(),
         question="Hello there!",
+        bot_id=BOT_ID,
         session_id=None,
         top_k=None,
     )
@@ -721,6 +824,7 @@ async def test_chat_service_streams_greeting_reply() -> None:
     answer_service = FakeAnswerService()
     service = ChatService(
         chat_repository=repository,  # type: ignore[arg-type]
+        bot_repository=FakeBotRepository(),  # type: ignore[arg-type]
         retrieval_service=retrieval,  # type: ignore[arg-type]
         answer_service=answer_service,  # type: ignore[arg-type]
         settings=Settings(rag_top_k=3),
@@ -731,6 +835,7 @@ async def test_chat_service_streams_greeting_reply() -> None:
         async for event in service.ask_stream(
             user=make_user(),
             question="good morning",
+            bot_id=BOT_ID,
             session_id=None,
             top_k=None,
         )
@@ -753,6 +858,7 @@ async def test_chat_service_uses_hybrid_search_for_questions() -> None:
     answer_service = FakeAnswerService()
     service = ChatService(
         chat_repository=repository,  # type: ignore[arg-type]
+        bot_repository=FakeBotRepository(),  # type: ignore[arg-type]
         retrieval_service=retrieval,  # type: ignore[arg-type]
         answer_service=answer_service,  # type: ignore[arg-type]
         settings=Settings(rag_top_k=3),
@@ -761,6 +867,7 @@ async def test_chat_service_uses_hybrid_search_for_questions() -> None:
     answer = await service.ask(
         user=make_user(),
         question="What is scaled dot-product attention?",
+        bot_id=BOT_ID,
         session_id=None,
         top_k=None,
     )
@@ -775,10 +882,13 @@ async def test_chat_service_keeps_strong_keyword_only_chunks() -> None:
     """A low vector score but strong keyword match still counts as enough context."""
     repository = FakeChatRepository()
     # vector below threshold, keyword above the keyword threshold.
-    retrieval = FakeRetrievalService(vector_scores=[0.05], keyword_scores=[0.4])
+    retrieval = FakeRetrievalService(
+        hybrid_scores=[0.5], vector_scores=[0.05], keyword_scores=[0.4]
+    )
     answer_service = FakeAnswerService()
     service = ChatService(
         chat_repository=repository,  # type: ignore[arg-type]
+        bot_repository=FakeBotRepository(),  # type: ignore[arg-type]
         retrieval_service=retrieval,  # type: ignore[arg-type]
         answer_service=answer_service,  # type: ignore[arg-type]
         settings=Settings(rag_top_k=3, rag_min_vector_score=0.25, rag_min_keyword_score=0.1),
@@ -787,6 +897,7 @@ async def test_chat_service_keeps_strong_keyword_only_chunks() -> None:
     await service.ask(
         user=make_user(),
         question="What is the attention head count?",
+        bot_id=BOT_ID,
         session_id=None,
         top_k=None,
     )
@@ -810,6 +921,7 @@ async def test_chat_service_streams_cache_hit_without_llm() -> None:
     )
     service = ChatService(
         chat_repository=repository,  # type: ignore[arg-type]
+        bot_repository=FakeBotRepository(),  # type: ignore[arg-type]
         retrieval_service=FakeRetrievalService(),  # type: ignore[arg-type]
         answer_service=answer_service,  # type: ignore[arg-type]
         settings=Settings(rag_top_k=3),
@@ -821,6 +933,7 @@ async def test_chat_service_streams_cache_hit_without_llm() -> None:
         async for event in service.ask_stream(
             user=make_user(),
             question="Cached question",
+            bot_id=BOT_ID,
             session_id=None,
             top_k=None,
         )

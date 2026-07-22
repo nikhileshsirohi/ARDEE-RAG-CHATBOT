@@ -1,12 +1,13 @@
 """Admin RAG document management routes."""
 
 import uuid
-from typing import Annotated
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile, status
 
 from app.api.dependencies.auth import RequireRole, SessionDep
 from app.config import get_settings
+from app.core.redis import get_redis_client
 from app.models.user import User, UserRole
 from app.repositories.rag_document import RagDocumentRepository
 from app.schemas.rag import RagDocumentResponse, RagDocumentUpdate
@@ -18,6 +19,7 @@ from app.services.pdf_ingestion import (
 )
 from app.services.pdf_storage import PdfStorageService
 from app.services.rag_document import RagDocumentService
+from app.services.semantic_cache import RedisLike, SemanticCacheService
 
 router = APIRouter(prefix="/rag/documents", tags=["RAG Documents"])
 
@@ -31,6 +33,7 @@ def get_document_service(session: SessionDep) -> RagDocumentService:
     return RagDocumentService(
         repository=repository,
         storage_service=PdfStorageService(settings),
+        semantic_cache_service=SemanticCacheService(cast(RedisLike, get_redis_client()), settings),
         ingestion_service=PdfIngestionService(
             repository=repository,
             extractor=PdfTextExtractor(),
@@ -53,10 +56,13 @@ async def upload_document(
     admin_user: AdminDep,
     service: DocumentServiceDep,
     title: Annotated[str, Form(min_length=1, max_length=255)],
+    bot_id: Annotated[uuid.UUID, Form()],
     file: Annotated[UploadFile, File()],
 ) -> RagDocumentResponse:
-    """Upload a PDF document. Admin-only."""
-    document = await service.upload_pdf(title=title, file=file, uploaded_by=admin_user)
+    """Upload a PDF document attached to a bot. Admin-only."""
+    document = await service.upload_pdf(
+        title=title, file=file, uploaded_by=admin_user, bot_id=bot_id
+    )
     return RagDocumentResponse.model_validate(document)
 
 
@@ -70,9 +76,10 @@ async def list_documents(
     service: DocumentServiceDep,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
+    bot_id: Annotated[uuid.UUID | None, Query()] = None,
 ) -> list[RagDocumentResponse]:
-    """List active RAG documents. Admin-only."""
-    documents = await service.list_documents(limit=limit, offset=offset)
+    """List active RAG documents, optionally scoped to a bot. Admin-only."""
+    documents = await service.list_documents(limit=limit, offset=offset, bot_id=bot_id)
     return [RagDocumentResponse.model_validate(document) for document in documents]
 
 

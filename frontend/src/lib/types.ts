@@ -24,14 +24,33 @@ export type SessionUser = {
   role: UserRole;
 };
 
+export type Bot = {
+  id: string;
+  name: string;
+  description: string | null;
+  system_prompt: string;
+  is_active: boolean;
+  created_by_id: string | null;
+  document_count: number;
+  ready_document_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type BotDetail = Bot & {
+  documents: RagDocument[];
+};
+
 export type ChatSession = {
   id: string;
   user_id: string;
+  bot_id: string | null;
   title: string;
   last_message_at: string | null;
   is_archived: boolean;
   created_at: string;
   updated_at: string;
+  total_tokens: number;
 };
 
 export type ChatMessage = {
@@ -76,6 +95,7 @@ export type ChatAskResponse = {
 
 export type RagDocument = {
   id: string;
+  bot_id: string | null;
   title: string;
   original_filename: string;
   status: string;
@@ -101,6 +121,16 @@ export type UserTokenUsageMetric = {
   request_count: number;
 };
 
+export type BotTokenUsageMetric = {
+  bot_id: string | null;
+  name: string;
+  input_tokens: number;
+  output_tokens: number;
+  embedding_tokens: number;
+  total_tokens: number;
+  request_count: number;
+};
+
 export type DailyTokenUsageMetric = {
   day: string;
   input_tokens: number;
@@ -113,6 +143,8 @@ export type DailyTokenUsageMetric = {
 export type SessionTokenUsageMetric = {
   session_id: string;
   title: string;
+  bot_id: string | null;
+  bot_name: string | null;
   last_message_at: string | null;
   input_tokens: number;
   output_tokens: number;

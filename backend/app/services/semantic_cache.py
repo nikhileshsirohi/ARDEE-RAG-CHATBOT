@@ -30,6 +30,9 @@ class RedisLike(Protocol):
     async def expire(self, name: str, time: int) -> object:
         """Set key TTL."""
 
+    async def delete(self, *names: str) -> object:
+        """Delete one or more keys."""
+
 
 @dataclass(frozen=True)
 class SemanticCacheHit:
@@ -53,11 +56,16 @@ class SemanticCacheService:
         self,
         *,
         query_embedding: list[float],
+        bot_id: uuid.UUID,
     ) -> SemanticCacheHit | None:
-        """Return the best cache hit above the configured similarity threshold."""
+        """Return the best cache hit above the configured similarity threshold.
+
+        The cache is namespaced per bot so identical questions asked of
+        different bots never return each other's answers.
+        """
         best_hit: SemanticCacheHit | None = None
 
-        for cache_id in await self.redis_client.smembers(SEMANTIC_CACHE_INDEX_KEY):
+        for cache_id in await self.redis_client.smembers(self._index_key(bot_id)):
             raw_entry = await self.redis_client.get(self._entry_key(cache_id))
             if raw_entry is None:
                 continue
@@ -89,8 +97,9 @@ class SemanticCacheService:
         source_citations: list[dict[str, object]],
         input_tokens: int,
         output_tokens: int,
+        bot_id: uuid.UUID,
     ) -> None:
-        """Store an answer with its query embedding."""
+        """Store an answer with its query embedding, namespaced by bot."""
         cache_id = str(uuid.uuid4())
         payload = {
             "query": query,
@@ -101,13 +110,26 @@ class SemanticCacheService:
             "output_tokens": output_tokens,
         }
         ttl_seconds = self.settings.semantic_cache_ttl_seconds
+        index_key = self._index_key(bot_id)
         await self.redis_client.setex(
             self._entry_key(cache_id),
             ttl_seconds,
             json.dumps(payload),
         )
-        await self.redis_client.sadd(SEMANTIC_CACHE_INDEX_KEY, cache_id)
-        await self.redis_client.expire(SEMANTIC_CACHE_INDEX_KEY, ttl_seconds)
+        await self.redis_client.sadd(index_key, cache_id)
+        await self.redis_client.expire(index_key, ttl_seconds)
+
+    async def clear_bot(self, *, bot_id: uuid.UUID) -> None:
+        """Remove all cached answers for one bot."""
+        index_key = self._index_key(bot_id)
+        cache_ids = await self.redis_client.smembers(index_key)
+        keys = [self._entry_key(cache_id) for cache_id in cache_ids]
+        keys.append(index_key)
+        await self.redis_client.delete(*keys)
+
+    @staticmethod
+    def _index_key(bot_id: uuid.UUID) -> str:
+        return f"{SEMANTIC_CACHE_INDEX_KEY}:{bot_id}"
 
     @staticmethod
     def _entry_key(cache_id: str) -> str:

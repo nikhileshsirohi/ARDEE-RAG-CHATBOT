@@ -43,9 +43,11 @@ function niceCeil(value: number) {
 
 export function UsageChart({
   selectedUserId,
+  selectedBotId,
   version = 0,
 }: {
-  selectedUserId: string;
+  selectedUserId?: string;
+  selectedBotId?: string;
   version?: number;
 }) {
   const [weekOffset, setWeekOffset] = useState(0);
@@ -68,7 +70,8 @@ export function UsageChart({
       const data = await api.dailyTokenUsage({
         start_at: week.start.toISOString(),
         end_at: week.end.toISOString(),
-        user_id: selectedUserId === "all" ? undefined : selectedUserId,
+        user_id: selectedUserId && selectedUserId !== "all" ? selectedUserId : undefined,
+        bot_id: selectedBotId && selectedBotId !== "all" ? selectedBotId : undefined,
       });
       setRows(data);
     } catch (err) {
@@ -77,7 +80,7 @@ export function UsageChart({
     } finally {
       setLoading(false);
     }
-  }, [week.start, week.end, selectedUserId]);
+  }, [week.start, week.end, selectedUserId, selectedBotId]);
 
   useEffect(() => {
     void load();

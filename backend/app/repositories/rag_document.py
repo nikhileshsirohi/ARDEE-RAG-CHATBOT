@@ -22,15 +22,20 @@ class RagDocumentRepository:
         await self.session.refresh(document)
         return document
 
-    async def list_active(self, *, limit: int, offset: int) -> list[RagDocument]:
-        """List non-deleted documents newest first."""
-        stmt: Select[tuple[RagDocument]] = (
-            select(RagDocument)
-            .where(RagDocument.deleted_at.is_(None))
-            .order_by(RagDocument.created_at.desc())
-            .limit(limit)
-            .offset(offset)
+    async def list_active(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        bot_id: uuid.UUID | None = None,
+    ) -> list[RagDocument]:
+        """List non-deleted documents newest first, optionally scoped to a bot."""
+        stmt: Select[tuple[RagDocument]] = select(RagDocument).where(
+            RagDocument.deleted_at.is_(None)
         )
+        if bot_id is not None:
+            stmt = stmt.where(RagDocument.bot_id == bot_id)
+        stmt = stmt.order_by(RagDocument.created_at.desc()).limit(limit).offset(offset)
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
@@ -40,6 +45,28 @@ class RagDocumentRepository:
             RagDocument.id == document_id,
             RagDocument.deleted_at.is_(None),
         )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_active_by_checksum(
+        self,
+        checksum_sha256: str,
+        *,
+        bot_id: uuid.UUID | None,
+        exclude_document_id: uuid.UUID | None = None,
+    ) -> RagDocument | None:
+        """Get an active bot document by file checksum, optionally excluding one document."""
+        stmt = select(RagDocument).where(
+            RagDocument.checksum_sha256 == checksum_sha256,
+            RagDocument.deleted_at.is_(None),
+        )
+        if bot_id is None:
+            stmt = stmt.where(RagDocument.bot_id.is_(None))
+        else:
+            stmt = stmt.where(RagDocument.bot_id == bot_id)
+        if exclude_document_id is not None:
+            stmt = stmt.where(RagDocument.id != exclude_document_id)
+        stmt = stmt.order_by(RagDocument.created_at.desc(), RagDocument.id.desc()).limit(1)
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
@@ -114,9 +141,12 @@ class RagDocumentRepository:
         return document
 
     async def soft_delete(self, document: RagDocument) -> RagDocument:
-        """Soft-delete a document so audit history remains intact."""
+        """Soft-delete a document and remove its searchable chunks."""
         document.deleted_at = datetime.now(UTC)
         document.status = RagDocumentStatus.ARCHIVED
+        await self.session.execute(
+            delete(DocumentChunk).where(DocumentChunk.document_id == document.id)
+        )
         await self.session.flush()
         await self.session.refresh(document)
         return document

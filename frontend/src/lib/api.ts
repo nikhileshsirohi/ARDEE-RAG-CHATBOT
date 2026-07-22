@@ -1,5 +1,8 @@
 import { clearTokens, getAccessToken, getRefreshToken, persistTokens } from "@/lib/auth";
 import type {
+  Bot,
+  BotDetail,
+  BotTokenUsageMetric,
   ChatAskResponse,
   ChatSession,
   ChatSessionDetail,
@@ -107,7 +110,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
  * Transparently refreshes an expired access token once, mirroring `request`.
  */
 export async function askStream(
-  payload: { question: string; session_id?: string | null; top_k?: number },
+  payload: { question: string; bot_id?: string | null; session_id?: string | null; top_k?: number },
   handlers: { onEvent: (event: ChatStreamEvent) => void; signal?: AbortSignal },
 ): Promise<void> {
   async function run(retry: boolean): Promise<void> {
@@ -184,8 +187,47 @@ export const api = {
     persistTokens(tokens);
     return tokens;
   },
-  sessions() {
-    return request<ChatSession[]>("/chat/sessions");
+  bots() {
+    return request<Bot[]>("/bots");
+  },
+  bot(botId: string) {
+    return request<BotDetail>(`/bots/${botId}`);
+  },
+  createBot(payload: { name: string; description?: string; system_prompt: string }) {
+    return request<Bot>("/bots", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+  updateBot(
+    botId: string,
+    payload: { name?: string; description?: string; system_prompt?: string; is_active?: boolean },
+  ) {
+    return request<Bot>(`/bots/${botId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+  },
+  deleteBot(botId: string) {
+    return request<void>(`/bots/${botId}`, {
+      method: "DELETE",
+    });
+  },
+  botDocuments(botId: string) {
+    return request<RagDocument[]>(`/bots/${botId}/documents`);
+  },
+  uploadBotDocument(botId: string, payload: { title: string; file: File }) {
+    const form = new FormData();
+    form.set("title", payload.title);
+    form.set("file", payload.file);
+    return request<RagDocument>(`/bots/${botId}/documents`, {
+      method: "POST",
+      body: form,
+    });
+  },
+  sessions(botId?: string) {
+    const suffix = botId ? `?bot_id=${encodeURIComponent(botId)}` : "";
+    return request<ChatSession[]>(`/chat/sessions${suffix}`);
   },
   session(sessionId: string) {
     return request<ChatSessionDetail>(`/chat/sessions/${sessionId}`);
@@ -204,23 +246,15 @@ export const api = {
   myUsage() {
     return request<MyTokenUsageSummary>("/chat/usage/me");
   },
-  ask(payload: { question: string; session_id?: string | null; top_k?: number }) {
+  ask(payload: { question: string; bot_id?: string | null; session_id?: string | null; top_k?: number }) {
     return request<ChatAskResponse>("/chat/ask", {
       method: "POST",
       body: JSON.stringify(payload),
     });
   },
-  documents() {
-    return request<RagDocument[]>("/rag/documents");
-  },
-  uploadDocument(payload: { title: string; file: File }) {
-    const form = new FormData();
-    form.set("title", payload.title);
-    form.set("file", payload.file);
-    return request<RagDocument>("/rag/documents", {
-      method: "POST",
-      body: form,
-    });
+  documents(botId?: string) {
+    const suffix = botId ? `?bot_id=${encodeURIComponent(botId)}` : "";
+    return request<RagDocument[]>(`/rag/documents${suffix}`);
   },
   updateDocument(documentId: string, payload: { title: string }) {
     return request<RagDocument>(`/rag/documents/${documentId}`, {
@@ -252,12 +286,26 @@ export const api = {
     const suffix = search.toString() ? `?${search}` : "";
     return request<UserTokenUsageMetric[]>(`/admin/metrics/token-usage/users${suffix}`);
   },
-  dailyTokenUsage(params: { start_at: string; end_at: string; user_id?: string }) {
+  botTokenUsage(params?: { start_at?: string; end_at?: string }) {
+    const search = new URLSearchParams();
+    if (params?.start_at) {
+      search.set("start_at", params.start_at);
+    }
+    if (params?.end_at) {
+      search.set("end_at", params.end_at);
+    }
+    const suffix = search.toString() ? `?${search}` : "";
+    return request<BotTokenUsageMetric[]>(`/admin/metrics/token-usage/bots${suffix}`);
+  },
+  dailyTokenUsage(params: { start_at: string; end_at: string; user_id?: string; bot_id?: string }) {
     const search = new URLSearchParams();
     search.set("start_at", params.start_at);
     search.set("end_at", params.end_at);
     if (params.user_id) {
       search.set("user_id", params.user_id);
+    }
+    if (params.bot_id) {
+      search.set("bot_id", params.bot_id);
     }
     return request<DailyTokenUsageMetric[]>(`/admin/metrics/token-usage/daily?${search}`);
   },

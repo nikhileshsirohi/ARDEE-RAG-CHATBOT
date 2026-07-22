@@ -22,7 +22,7 @@ export function ProtectedRoute({
       return;
     }
     if (role && user.role !== role) {
-      router.replace("/dashboard");
+      router.replace("/bots");
       return;
     }
     setReady(true);

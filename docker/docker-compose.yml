@@ -21,7 +21,8 @@ services:
     environment:
       POSTGRES_HOST: postgres
       REDIS_HOST: redis
-      UPLOAD_DIR: backend/storage/uploads/rag
+      # Absolute path inside the container (matches the volume mount below).
+      UPLOAD_DIR: /app/backend/storage/uploads/rag
     ports:
       - "${APP_PORT:-8000}:8000"
     volumes:

@@ -27,15 +27,25 @@ import os
 import sys
 from dataclasses import dataclass
 
+from sqlalchemy import select, update
+
 from app.config import get_settings
 from app.core.database import _get_session_factory as get_session_factory
 from app.core.database import close_db, init_db
 from app.core.logging import setup_logging
 from app.core.security import get_password_hash
+from app.models.rag import Bot, ChatSession, RagDocument
 from app.models.user import User, UserRole
 from app.repositories.user import UserRepository
 
 DEFAULT_PASSWORD = "StagingPass123!"
+
+DEFAULT_BOT_NAME = "General Knowledge Assistant"
+DEFAULT_BOT_DESCRIPTION = "Answers questions from the uploaded knowledge base."
+DEFAULT_BOT_SYSTEM_PROMPT = (
+    "You are a helpful enterprise assistant. Answer the user's questions "
+    "accurately and concisely using the bot's knowledge base."
+)
 
 
 @dataclass(frozen=True)
@@ -102,6 +112,62 @@ async def seed_accounts(password: str) -> tuple[int, int]:
     return created, skipped
 
 
+async def seed_default_bot() -> bool:
+    """Create a default bot (idempotent) and backfill any bot-less rows.
+
+    Ensures documents, sessions, and usage created before bots existed become
+    usable by attaching them to a single default bot. Returns True if the bot
+    was created.
+    """
+    created = False
+    await init_db()
+    try:
+        factory = get_session_factory()
+        async with factory() as session:
+            existing = (
+                await session.execute(
+                    select(Bot).where(
+                        Bot.name == DEFAULT_BOT_NAME, Bot.deleted_at.is_(None)
+                    )
+                )
+            ).scalar_one_or_none()
+
+            if existing is None:
+                admin = (
+                    await session.execute(
+                        select(User).where(User.role == UserRole.ADMIN).limit(1)
+                    )
+                ).scalar_one_or_none()
+                existing = Bot(
+                    name=DEFAULT_BOT_NAME,
+                    description=DEFAULT_BOT_DESCRIPTION,
+                    system_prompt=DEFAULT_BOT_SYSTEM_PROMPT,
+                    created_by_id=admin.id if admin else None,
+                )
+                session.add(existing)
+                await session.flush()
+                created = True
+                print(f"  + create  BOT   {DEFAULT_BOT_NAME}")
+            else:
+                print(f"  = skip    BOT   {DEFAULT_BOT_NAME} (exists)")
+
+            await session.execute(
+                update(RagDocument)
+                .where(RagDocument.bot_id.is_(None))
+                .values(bot_id=existing.id)
+            )
+            await session.execute(
+                update(ChatSession)
+                .where(ChatSession.bot_id.is_(None))
+                .values(bot_id=existing.id)
+            )
+            await session.commit()
+    finally:
+        await close_db()
+
+    return created
+
+
 def main() -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description="Seed staging admin/user accounts.")
@@ -130,9 +196,11 @@ def main() -> int:
     print(f"Seeding {len(SEED_USERS)} accounts (2 admins, 6 users)...")
 
     created, skipped = asyncio.run(seed_accounts(password))
+    bot_created = asyncio.run(seed_default_bot())
 
     print("-" * 48)
     print(f"Done. Created {created}, skipped {skipped}.")
+    print(f"Default bot {'created' if bot_created else 'already present'}.")
     if created:
         print(f"Shared password for new accounts: {password}")
     return 0

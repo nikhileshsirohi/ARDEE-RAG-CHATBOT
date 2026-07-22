@@ -1,0 +1,109 @@
+# =============================================================================
+# Render Blueprint — deploys the whole stack: PostgreSQL (pgvector), Redis,
+# the FastAPI backend (Docker), and the Next.js frontend (Docker).
+#
+# Docs: https://render.com/docs/blueprint-spec
+#
+# After the first deploy you must set a few values that aren't known until the
+# services exist (marked `sync: false` below). The step-by-step guide covers
+# exactly when. Free Postgres/Redis are fine for a demo (note: free Postgres is
+# removed after ~30 days of the trial — upgrade the plan for anything lasting).
+# =============================================================================
+
+databases:
+  - name: ardee-postgres
+    databaseName: ardee_rag
+    user: ardee
+    plan: free
+    postgresMajorVersion: "16"
+    # pgvector is available on Render Postgres; the `001_enable_pgvector`
+    # migration runs `CREATE EXTENSION IF NOT EXISTS vector`.
+
+services:
+  # ── Redis (cache + rate limiting) ──────────────────────────────────────────
+  - type: redis
+    name: ardee-redis
+    plan: free
+    ipAllowList: [] # empty = internal connections only (from our services)
+
+  # ── FastAPI backend (Docker) ───────────────────────────────────────────────
+  - type: web
+    name: ardee-backend
+    runtime: docker
+    plan: free
+    region: oregon # keep DB, Redis, backend, frontend in the SAME region
+    dockerfilePath: ./docker/backend.Dockerfile
+    dockerContext: ./backend
+    # Runs migrations then starts uvicorn (see backend/scripts/start.sh).
+    # Render doesn't run dockerCommand through a shell, so we exec a script file
+    # rather than using inline "&&".
+    dockerCommand: sh scripts/start.sh
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: APP_DEBUG
+        value: "false"
+      - key: APP_LOG_LEVEL
+        value: INFO
+      # Absolute, app-user-owned upload dir (created + chowned in the Dockerfile).
+      # A relative path resolves against "/" inside the image and fails with
+      # PermissionError. Note: this disk is ephemeral on Render — uploaded PDFs
+      # are lost on restart, but their chunks/embeddings persist in Postgres, so
+      # search keeps working. (Object storage / S3 is on the roadmap.)
+      - key: UPLOAD_DIR
+        value: /app/backend/storage/uploads/rag
+      - key: OPENAI_API_KEY
+        sync: false # set your real key in the dashboard
+      - key: JWT_SECRET_KEY
+        generateValue: true # Render generates a strong secret
+      # Set this AFTER the frontend exists, to the frontend's URL, e.g.
+      #   https://ardee-frontend.onrender.com
+      - key: CORS_ORIGINS
+        sync: false
+      # PostgreSQL connection (wired automatically from the database above)
+      - key: POSTGRES_HOST
+        fromDatabase:
+          name: ardee-postgres
+          property: host
+      - key: POSTGRES_PORT
+        fromDatabase:
+          name: ardee-postgres
+          property: port
+      - key: POSTGRES_DB
+        fromDatabase:
+          name: ardee-postgres
+          property: database
+      - key: POSTGRES_USER
+        fromDatabase:
+          name: ardee-postgres
+          property: user
+      - key: POSTGRES_PASSWORD
+        fromDatabase:
+          name: ardee-postgres
+          property: password
+      # Redis connection (wired automatically from the redis service above)
+      - key: REDIS_HOST
+        fromService:
+          type: redis
+          name: ardee-redis
+          property: host
+      - key: REDIS_PORT
+        fromService:
+          type: redis
+          name: ardee-redis
+          property: port
+
+  # ── Next.js frontend (Docker) ──────────────────────────────────────────────
+  - type: web
+    name: ardee-frontend
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./docker/frontend.Dockerfile
+    dockerContext: ./frontend
+    envVars:
+      # NEXT_PUBLIC_* is inlined at BUILD time. Set this to the backend URL,
+      # e.g. https://ardee-backend.onrender.com/api/v1 — then trigger a deploy.
+      - key: NEXT_PUBLIC_API_BASE_URL
+        sync: false

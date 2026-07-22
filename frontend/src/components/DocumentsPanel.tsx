@@ -1,13 +1,9 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { api, ApiError } from "@/lib/api";
 import type { RagDocument } from "@/lib/types";
-
-function formatNumber(value: number) {
-  return new Intl.NumberFormat().format(value);
-}
 
 function statusClass(status: string) {
   const normalized = status.toUpperCase();
@@ -23,32 +19,63 @@ function statusClass(status: string) {
   return "status-pill";
 }
 
-type RowState = {
-  title: string;
-  file: File | null;
-};
+function formatStatus(status: string) {
+  const normalized = status.toLowerCase();
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
 
-type PendingUpdate = { document: RagDocument; title: string; file: File | null };
+function formatDate(value: string) {
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(value));
+}
 
-export function DocumentsPanel({ onActivity }: { onActivity?: () => void }) {
+function titleFromFile(file: File) {
+  const name = file.name.trim();
+  return name.replace(/\.pdf$/i, "") || name;
+}
+
+function PdfGlyph() {
+  return (
+    <svg
+      aria-hidden
+      className="h-5 w-5 shrink-0 text-[var(--danger)]"
+      fill="none"
+      viewBox="0 0 24 24"
+    >
+      <path
+        d="M7 3.75h6.5L19 9.25V20.25a.75.75 0 0 1-.75.75H7.75A.75.75 0 0 1 7 20.25V3.75Z"
+        stroke="currentColor"
+        strokeWidth="1.5"
+      />
+      <path d="M13.5 3.75V9.25H19" stroke="currentColor" strokeWidth="1.5" />
+      <path
+        d="M9 13.5h6M9 16.5h4"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.5"
+      />
+    </svg>
+  );
+}
+
+export function DocumentsPanel({
+  botId,
+  onActivity,
+}: {
+  botId: string;
+  onActivity?: () => void;
+}) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [documents, setDocuments] = useState<RagDocument[]>([]);
-  const [rowState, setRowState] = useState<Record<string, RowState>>({});
-  const [uploadTitle, setUploadTitle] = useState("");
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [pendingUpdate, setPendingUpdate] = useState<PendingUpdate | null>(null);
   const [pendingDelete, setPendingDelete] = useState<RagDocument | null>(null);
 
   const load = useCallback(async () => {
-    const rows = await api.documents();
+    const rows = await api.botDocuments(botId);
     setDocuments(rows);
-    setRowState(
-      Object.fromEntries(rows.map((doc) => [doc.id, { title: doc.title, file: null }])),
-    );
-  }, []);
+  }, [botId]);
 
   useEffect(() => {
     async function boot() {
@@ -63,77 +90,33 @@ export function DocumentsPanel({ onActivity }: { onActivity?: () => void }) {
     void boot();
   }, [load]);
 
-  function setRow(id: string, patch: Partial<RowState>) {
-    setRowState((current) => ({ ...current, [id]: { ...current[id], ...patch } }));
-  }
+  async function uploadFiles(files: FileList | File[]) {
+    const pdfs = Array.from(files).filter((file) => file.name.toLowerCase().endsWith(".pdf"));
+    if (pdfs.length === 0) {
+      setError("Choose one or more PDF files.");
+      return;
+    }
 
-  async function upload(event: FormEvent) {
-    event.preventDefault();
-    const title = uploadTitle.trim();
-    if (!title) {
-      setError("A document name is required to upload a PDF.");
-      return;
-    }
-    if (!uploadFile) {
-      setError("Choose a PDF file to upload.");
-      return;
-    }
     setBusy(true);
     setError("");
     setNotice("");
     try {
-      await api.uploadDocument({ title, file: uploadFile });
-      setUploadTitle("");
-      setUploadFile(null);
-      setNotice(`Uploaded “${title}”.`);
+      for (const file of pdfs) {
+        await api.uploadBotDocument(botId, { title: titleFromFile(file), file });
+      }
+      setNotice(
+        pdfs.length === 1 ? `Uploaded “${pdfs[0].name}”.` : `Uploaded ${pdfs.length} PDFs.`,
+      );
       await load();
       onActivity?.();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Upload failed.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function requestUpdate(document: RagDocument) {
-    const state = rowState[document.id];
-    const title = state?.title.trim() ?? "";
-    const file = state?.file ?? null;
-    if (!title) {
-      setError("Document name cannot be empty.");
-      return;
-    }
-    if (title === document.title && !file) {
-      setError("Change the name or choose a new PDF before updating.");
-      return;
-    }
-    setError("");
-    setPendingUpdate({ document, title, file });
-  }
-
-  async function confirmUpdate() {
-    if (!pendingUpdate) {
-      return;
-    }
-    const { document, title, file } = pendingUpdate;
-    setBusy(true);
-    setError("");
-    setNotice("");
-    try {
-      if (title !== document.title) {
-        await api.updateDocument(document.id, { title });
-      }
-      if (file) {
-        await api.replaceDocumentFile(document.id, file);
-      }
-      setPendingUpdate(null);
-      setNotice(`Updated “${title}”.`);
       await load();
-      onActivity?.();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Update failed.");
     } finally {
       setBusy(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
     }
   }
 
@@ -161,45 +144,36 @@ export function DocumentsPanel({ onActivity }: { onActivity?: () => void }) {
     <div className="admin-panel p-0">
       <div className="admin-section-head">
         <div>
-          <h2 className="text-lg font-black text-slate-950">RAG documents</h2>
-          <p className="text-sm text-slate-500">
-            Upload PDFs (name required), replace a file with a new one, rename, or delete. Updates
-            and deletes ask for confirmation.
+          <h2 className="text-lg font-semibold tracking-tight text-slate-950">Knowledge</h2>
+          <p className="mt-1 text-sm leading-6 text-slate-500">
+            PDFs this bot can search and cite in answers.
           </p>
         </div>
-        <button className="btn btn-secondary" disabled={busy} onClick={() => void load()} type="button">
-          Refresh
-        </button>
-      </div>
-
-      <form className="grid gap-3 border-b border-slate-200 p-4 lg:grid-cols-[1fr_1fr_auto]" onSubmit={upload}>
-        <label className="block">
-          <span className="mb-1 block text-xs font-black uppercase text-slate-500">
-            Document name<span className="text-[#bb3e3e]"> *</span>
-          </span>
-          <input
-            className="input"
-            onChange={(event) => setUploadTitle(event.target.value)}
-            placeholder="e.g. Employee Handbook 2026"
-            required
-            value={uploadTitle}
-          />
-        </label>
-        <label className="block">
-          <span className="mb-1 block text-xs font-black uppercase text-slate-500">PDF file *</span>
+        <div className="flex items-center gap-2">
           <input
             accept="application/pdf"
-            className="input"
-            onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)}
+            className="sr-only"
+            disabled={busy}
+            multiple
+            onChange={(event) => {
+              const files = event.target.files;
+              if (files?.length) {
+                void uploadFiles(files);
+              }
+            }}
+            ref={fileInputRef}
             type="file"
           />
-        </label>
-        <div className="flex items-end">
-          <button className="btn btn-primary w-full" disabled={busy} type="submit">
-            Upload PDF
+          <button
+            className="btn btn-primary"
+            disabled={busy}
+            onClick={() => fileInputRef.current?.click()}
+            type="button"
+          >
+            {busy ? "Uploading..." : "+ Add knowledge"}
           </button>
         </div>
-      </form>
+      </div>
 
       {error ? (
         <div className="mx-4 mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">
@@ -207,125 +181,100 @@ export function DocumentsPanel({ onActivity }: { onActivity?: () => void }) {
         </div>
       ) : null}
       {notice ? (
-        <div className="mx-4 mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">
+        <div className="mx-4 mt-4 rounded-lg border border-[var(--primary-soft-border)] bg-[var(--accent-soft)] px-3 py-2 text-sm font-semibold text-[var(--accent)]">
           {notice}
         </div>
       ) : null}
 
-      <div className="table-wrap p-2">
+      <div className="table-wrap px-2 pb-2">
         <table>
           <thead>
             <tr>
-              <th className="min-w-64">Name &amp; file</th>
+              <th className="min-w-64">Name</th>
+              <th>Last updated</th>
               <th>Status</th>
-              <th>Pages</th>
-              <th>Chunks</th>
-              <th>Replacement PDF</th>
-              <th>Actions</th>
+              <th className="w-14">
+                <span className="sr-only">Actions</span>
+              </th>
             </tr>
           </thead>
           <tbody>
-            {documents.map((document) => {
-              const state = rowState[document.id] ?? { title: document.title, file: null };
-              return (
-                <tr key={document.id}>
-                  <td>
-                    <input
-                      className="input min-w-56"
-                      onChange={(event) => setRow(document.id, { title: event.target.value })}
-                      value={state.title}
-                    />
-                    <div className="mt-1 text-xs font-semibold text-slate-500">
-                      {document.original_filename} · v{document.version}
+            {documents.map((document) => (
+              <tr key={document.id}>
+                <td>
+                  <div className="flex items-center gap-3">
+                    <PdfGlyph />
+                    <div className="min-w-0">
+                      <div className="truncate font-semibold text-slate-900">
+                        {document.original_filename || document.title}
+                      </div>
+                      {document.page_count ? (
+                        <div className="mt-0.5 text-xs text-slate-500">
+                          {document.page_count} {document.page_count === 1 ? "page" : "pages"}
+                        </div>
+                      ) : null}
                     </div>
-                  </td>
-                  <td>
-                    <span className={statusClass(document.status)}>{document.status}</span>
-                  </td>
-                  <td>{document.page_count ?? "n/a"}</td>
-                  <td>{formatNumber(document.chunk_count)}</td>
-                  <td>
-                    <input
-                      accept="application/pdf"
-                      className="input min-w-52"
-                      key={`${document.id}-${document.version}`}
-                      onChange={(event) =>
-                        setRow(document.id, { file: event.target.files?.[0] ?? null })
-                      }
-                      type="file"
-                    />
-                  </td>
-                  <td>
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        className="btn btn-primary"
-                        disabled={busy}
-                        onClick={() => requestUpdate(document)}
-                        type="button"
-                      >
-                        Update
-                      </button>
-                      <button
-                        className="btn btn-danger"
-                        disabled={busy}
-                        onClick={() => setPendingDelete(document)}
-                        type="button"
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
+                  </div>
+                </td>
+                <td className="whitespace-nowrap text-sm text-slate-600">
+                  {formatDate(document.updated_at)}
+                </td>
+                <td>
+                  <span className={statusClass(document.status)}>
+                    {formatStatus(document.status)}
+                  </span>
+                </td>
+                <td>
+                  <button
+                    aria-label={`Delete ${document.title}`}
+                    className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-red-50 hover:text-[var(--danger)]"
+                    disabled={busy}
+                    onClick={() => setPendingDelete(document)}
+                    type="button"
+                  >
+                    <span aria-hidden className="text-lg leading-none">
+                      ×
+                    </span>
+                  </button>
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
+        {loading ? (
+          <div className="p-5 text-sm text-slate-500">Loading documents...</div>
+        ) : null}
         {!loading && documents.length === 0 ? (
-          <div className="p-5 text-sm text-slate-500">No RAG files uploaded yet.</div>
+          <div className="px-5 py-10 text-center">
+            <p className="text-sm font-semibold text-slate-800">No knowledge sources yet</p>
+            <p className="mx-auto mt-1 max-w-sm text-sm text-slate-500">
+              Add a PDF to ground this bot’s answers in your documents.
+            </p>
+            <button
+              className="btn btn-primary mt-4"
+              disabled={busy}
+              onClick={() => fileInputRef.current?.click()}
+              type="button"
+            >
+              + Add knowledge
+            </button>
+          </div>
         ) : null}
       </div>
 
       <ConfirmDialog
         busy={busy}
-        confirmLabel="Apply update"
+        confirmLabel="Delete"
         message={
           <>
-            Update <span className="font-black text-slate-800">{pendingUpdate?.document.title}</span>?
-            <ul className="mt-2 list-disc space-y-1 pl-5">
-              {pendingUpdate && pendingUpdate.title !== pendingUpdate.document.title ? (
-                <li>
-                  Rename to <span className="font-bold">“{pendingUpdate.title}”</span>
-                </li>
-              ) : null}
-              {pendingUpdate?.file ? (
-                <li>
-                  Replace the PDF with{" "}
-                  <span className="font-bold">{pendingUpdate.file.name}</span> and re-index it
-                </li>
-              ) : null}
-            </ul>
-          </>
-        }
-        onCancel={() => setPendingUpdate(null)}
-        onConfirm={() => void confirmUpdate()}
-        open={pendingUpdate !== null}
-        title="Confirm document update"
-        tone="primary"
-      />
-
-      <ConfirmDialog
-        busy={busy}
-        confirmLabel="Delete document"
-        message={
-          <>
-            Delete <span className="font-black text-slate-800">{pendingDelete?.title}</span> and
+            Delete <span className="font-semibold text-slate-800">{pendingDelete?.title}</span> and
             remove it from search? This cannot be undone.
           </>
         }
         onCancel={() => setPendingDelete(null)}
         onConfirm={() => void confirmDelete()}
         open={pendingDelete !== null}
-        title="Confirm document delete"
+        title="Delete document"
         tone="danger"
       />
     </div>

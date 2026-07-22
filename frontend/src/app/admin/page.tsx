@@ -1,13 +1,12 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AppNav } from "@/components/AppNav";
-import { ChatWorkspace } from "@/components/ChatWorkspace";
-import { DocumentsPanel } from "@/components/DocumentsPanel";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
 import { UsageChart } from "@/components/UsageChart";
 import { api, ApiError } from "@/lib/api";
-import type { SessionUser, UserTokenUsageMetric } from "@/lib/types";
+import type { BotTokenUsageMetric, SessionUser, UserTokenUsageMetric } from "@/lib/types";
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat().format(value);
@@ -26,15 +25,20 @@ function sortAdminsFirst(rows: UserTokenUsageMetric[]) {
 function MetricTile({ label, value, tone }: { label: string; value: number; tone: string }) {
   return (
     <div className={`admin-tile admin-tile-${tone}`}>
-      <div className="text-xs font-black uppercase text-slate-500">{label}</div>
-      <div className="mt-2 text-2xl font-black text-slate-950">{formatNumber(value)}</div>
+      <div className="text-[0.7rem] font-semibold uppercase tracking-[0.08em] text-slate-500">
+        {label}
+      </div>
+      <div className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">
+        {formatNumber(value)}
+      </div>
     </div>
   );
 }
 
 function AdminConsole({ user }: { user: SessionUser }) {
-  const [metrics, setMetrics] = useState<UserTokenUsageMetric[]>([]);
-  const [selectedUserId, setSelectedUserId] = useState("all");
+  const [users, setUsers] = useState<UserTokenUsageMetric[]>([]);
+  const [botUsage, setBotUsage] = useState<BotTokenUsageMetric[]>([]);
+  const [scope, setScope] = useState("all");
   const [chartVersion, setChartVersion] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -42,8 +46,9 @@ function AdminConsole({ user }: { user: SessionUser }) {
   const loadMetrics = useCallback(async () => {
     setError("");
     try {
-      const rows = await api.userTokenUsage();
-      setMetrics(sortAdminsFirst(rows));
+      const [userRows, botRows] = await Promise.all([api.userTokenUsage(), api.botTokenUsage()]);
+      setUsers(sortAdminsFirst(userRows));
+      setBotUsage(botRows);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Unable to load metrics.");
     }
@@ -67,7 +72,7 @@ function AdminConsole({ user }: { user: SessionUser }) {
 
   const totals = useMemo(
     () =>
-      metrics.reduce(
+      users.reduce(
         (acc, row) => ({
           input: acc.input + row.input_tokens,
           output: acc.output + row.output_tokens,
@@ -77,26 +82,35 @@ function AdminConsole({ user }: { user: SessionUser }) {
         }),
         { input: 0, output: 0, embedding: 0, total: 0, requests: 0 },
       ),
-    [metrics],
+    [users],
   );
+
+  const selectedUserId = scope.startsWith("user:") ? scope.slice(5) : undefined;
+  const selectedBotId = scope.startsWith("bot:") ? scope.slice(4) : undefined;
 
   return (
     <div className="admin-shell">
       <AppNav user={user} />
       <main className="mx-auto max-w-[1500px] space-y-5 px-4 py-5 lg:px-6">
-        <section className="admin-hero">
+        <section className="admin-hero animate-rise">
           <div>
-            <p className="text-xs font-black uppercase tracking-wide text-[#46615a]">Admin Console</p>
-            <h1 className="mt-2 text-3xl font-black text-slate-950">RAG operations dashboard</h1>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-              Manage the document library, monitor per-user token usage, and test the streaming RAG
-              chatbot — all from one admin session.
+            <p className="page-kicker">Admin Console</p>
+            <h1 className="page-title">Operations</h1>
+            <p className="page-lede">
+              Monitor token usage by user and by bot. Manage bots and their knowledge bases from the{" "}
+              <Link
+                className="font-semibold text-[var(--primary)] underline-offset-2 hover:underline"
+                href="/bots"
+              >
+                Bots
+              </Link>{" "}
+              page.
             </p>
           </div>
           <div className="grid gap-2 text-sm font-bold text-slate-600 sm:grid-cols-3">
-            <span className="admin-mini-stat">{metrics.length} users</span>
+            <span className="admin-mini-stat">{users.length} users</span>
+            <span className="admin-mini-stat">{botUsage.length} bots</span>
             <span className="admin-mini-stat">{formatNumber(totals.total)} tokens</span>
-            <span className="admin-mini-stat">{formatNumber(totals.requests)} requests</span>
           </div>
         </section>
 
@@ -119,9 +133,7 @@ function AdminConsole({ user }: { user: SessionUser }) {
             <div className="admin-section-head">
               <div>
                 <h2 className="text-lg font-black text-slate-950">Users &amp; token usage</h2>
-                <p className="text-sm text-slate-500">
-                  Descending by usage — admins listed first.
-                </p>
+                <p className="text-sm text-slate-500">Descending by usage — admins listed first.</p>
               </div>
               <button className="btn btn-secondary" onClick={() => void refreshAll()} type="button">
                 Refresh
@@ -141,7 +153,7 @@ function AdminConsole({ user }: { user: SessionUser }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {metrics.map((row) => (
+                  {users.map((row) => (
                     <tr key={row.user_id}>
                       <td>
                         <div className="font-black text-slate-950">
@@ -163,7 +175,7 @@ function AdminConsole({ user }: { user: SessionUser }) {
                   ))}
                 </tbody>
               </table>
-              {!loading && metrics.length === 0 ? (
+              {!loading && users.length === 0 ? (
                 <div className="p-5 text-sm text-slate-500">No users found.</div>
               ) : null}
             </div>
@@ -177,39 +189,73 @@ function AdminConsole({ user }: { user: SessionUser }) {
               </div>
               <select
                 className="input sm:max-w-56"
-                onChange={(event) => setSelectedUserId(event.target.value)}
-                value={selectedUserId}
+                onChange={(event) => setScope(event.target.value)}
+                value={scope}
               >
-                <option value="all">All users</option>
-                {metrics.map((row) => (
-                  <option key={row.user_id} value={row.user_id}>
-                    {row.full_name ?? row.email}
-                    {row.role === "ADMIN" ? " (admin)" : ""}
-                  </option>
-                ))}
+                <option value="all">All usage</option>
+                <optgroup label="By user">
+                  {users.map((row) => (
+                    <option key={row.user_id} value={`user:${row.user_id}`}>
+                      {row.full_name ?? row.email}
+                      {row.role === "ADMIN" ? " (admin)" : ""}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="By bot">
+                  {botUsage.map((row) => (
+                    <option key={row.bot_id ?? "none"} value={`bot:${row.bot_id}`}>
+                      {row.name}
+                    </option>
+                  ))}
+                </optgroup>
               </select>
             </div>
-            <UsageChart selectedUserId={selectedUserId} version={chartVersion} />
+            <UsageChart
+              selectedBotId={selectedBotId}
+              selectedUserId={selectedUserId}
+              version={chartVersion}
+            />
           </div>
         </section>
 
-        <DocumentsPanel onActivity={() => void refreshAll()} />
-
-        <section className="admin-panel flex h-[720px] flex-col overflow-hidden p-0">
+        <section className="admin-panel p-0">
           <div className="admin-section-head">
             <div>
-              <h2 className="text-lg font-black text-slate-950">Admin chatbot</h2>
-              <p className="text-sm text-slate-500">
-                Streaming answers with citations, across your own admin sessions.
-              </p>
+              <h2 className="text-lg font-black text-slate-950">Bots &amp; token usage</h2>
+              <p className="text-sm text-slate-500">Token consumption grouped by bot.</p>
             </div>
+            <Link className="btn btn-secondary" href="/bots">
+              Manage bots
+            </Link>
           </div>
-          <div className="flex min-h-0 flex-1 flex-col p-4">
-            <ChatWorkspace
-              heading="Admin RAG chat"
-              subheading="Live-streamed answers grounded in the uploaded PDFs."
-              onActivity={() => void refreshAll()}
-            />
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Bot</th>
+                  <th>Total</th>
+                  <th>Input</th>
+                  <th>Output</th>
+                  <th>Embedding</th>
+                  <th>Requests</th>
+                </tr>
+              </thead>
+              <tbody>
+                {botUsage.map((row) => (
+                  <tr key={row.bot_id ?? "none"}>
+                    <td className="font-black text-slate-950">{row.name}</td>
+                    <td className="font-black">{formatNumber(row.total_tokens)}</td>
+                    <td>{formatNumber(row.input_tokens)}</td>
+                    <td>{formatNumber(row.output_tokens)}</td>
+                    <td>{formatNumber(row.embedding_tokens)}</td>
+                    <td>{formatNumber(row.request_count)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {!loading && botUsage.length === 0 ? (
+              <div className="p-5 text-sm text-slate-500">No bots found.</div>
+            ) : null}
           </div>
         </section>
       </main>

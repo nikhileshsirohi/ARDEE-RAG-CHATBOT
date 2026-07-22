@@ -34,8 +34,9 @@ class RagRetrievalRepository:
         *,
         query_embedding: list[float],
         limit: int,
+        bot_id: uuid.UUID,
     ) -> list[HybridSearchResult]:
-        """Search READY document chunks by embedding similarity only."""
+        """Search READY document chunks (for one bot) by embedding similarity."""
         embedding_literal = self._to_vector_literal(query_embedding)
         stmt = text(
             """
@@ -58,6 +59,7 @@ class RagRetrievalRepository:
             CROSS JOIN query
             WHERE rd.status = 'READY'
               AND rd.deleted_at IS NULL
+              AND rd.bot_id = :bot_id
             ORDER BY dc.embedding <=> query.embedding
             LIMIT :limit
             """
@@ -67,6 +69,7 @@ class RagRetrievalRepository:
             {
                 "query_embedding": embedding_literal,
                 "limit": limit,
+                "bot_id": str(bot_id),
             },
         )
 
@@ -92,16 +95,15 @@ class RagRetrievalRepository:
         query_text: str,
         query_embedding: list[float],
         limit: int,
+        bot_id: uuid.UUID,
     ) -> list[HybridSearchResult]:
-        """Search READY chunks with vector + keyword Reciprocal Rank Fusion.
+        """Search READY chunks with vector + keyword retrieval.
 
-        Two candidate sets are gathered independently — nearest neighbors by
-        embedding cosine distance, and best full-text matches via ``ts_rank_cd``
-        — then fused with RRF (``1 / (k + rank)``) so a chunk ranked highly by
-        *either* signal surfaces. Each row keeps its real ``vector_score`` and
-        ``keyword_score`` for the confidence gate applied upstream. When the
-        query yields no valid ``tsquery`` terms the keyword set is simply empty,
-        degrading gracefully to vector-only ranking.
+        Two candidate sets are gathered independently: nearest neighbors by
+        embedding cosine distance, and best full-text matches via ``ts_rank_cd``.
+        The final ``hybrid_score`` is a calibrated 0-1 confidence value derived
+        from the actual vector score and normalized keyword strength, so it is
+        useful both for ranking and for explaining retrieval confidence.
         """
         candidate_limit = max(limit * 5, 20)
         embedding_literal = self._to_vector_literal(query_embedding)
@@ -131,6 +133,7 @@ class RagRetrievalRepository:
                 CROSS JOIN query
                 WHERE rd.status = 'READY'
                   AND rd.deleted_at IS NULL
+                  AND rd.bot_id = :bot_id
                 ORDER BY dc.embedding <=> query.embedding
                 LIMIT :candidate_limit
             ),
@@ -154,6 +157,7 @@ class RagRetrievalRepository:
                 CROSS JOIN query
                 WHERE rd.status = 'READY'
                   AND rd.deleted_at IS NULL
+                  AND rd.bot_id = :bot_id
                   AND query.ts_query IS NOT NULL
                   AND dc.search_vector @@ query.ts_query
                 ORDER BY keyword_score DESC
@@ -174,9 +178,15 @@ class RagRetrievalRepository:
                 token_count,
                 max(vector_score) AS vector_score,
                 max(keyword_score) AS keyword_score,
-                max(
-                    coalesce(1.0 / (60 + vector_rank), 0)
-                    + coalesce(1.0 / (60 + keyword_rank), 0)
+                least(
+                    1.0,
+                    greatest(
+                        0.0,
+                        0.7 * greatest(max(vector_score), 0.0)
+                        + 0.3 * (
+                            max(keyword_score) / nullif(max(keyword_score) + 0.1, 0)
+                        )
+                    )
                 ) AS hybrid_score
             FROM combined
             GROUP BY
@@ -198,6 +208,7 @@ class RagRetrievalRepository:
                 "query_text": query_text,
                 "candidate_limit": candidate_limit,
                 "limit": limit,
+                "bot_id": str(bot_id),
             },
         )
         return [

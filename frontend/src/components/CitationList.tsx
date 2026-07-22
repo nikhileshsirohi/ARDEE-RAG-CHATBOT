@@ -30,7 +30,7 @@ export function CitationList({ citations }: { citations?: Citation[] }) {
             </div>
             <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-500">
               {typeof citation.hybrid_score === "number" ? (
-                <span>Hybrid {citation.hybrid_score.toFixed(3)}</span>
+                <span>Confidence {citation.hybrid_score.toFixed(3)}</span>
               ) : null}
               {typeof citation.vector_score === "number" ? (
                 <span>Vector {citation.vector_score.toFixed(3)}</span>

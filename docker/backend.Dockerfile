@@ -41,8 +41,13 @@ COPY --from=base /app/.venv /app/.venv
 # Ensure the venv's Python is on PATH
 ENV PATH="/app/.venv/bin:$PATH"
 
-# Copy application code
+# Copy application code, database migrations, and operational scripts.
+# alembic/ + alembic.ini let migrations run in the container
+# (`alembic upgrade head`); scripts/ enables seeding (`python -m scripts.seed_staging`).
 COPY app/ app/
+COPY alembic/ alembic/
+COPY alembic.ini ./
+COPY scripts/ scripts/
 
 # Create non-root user for security
 RUN groupadd --gid 1000 appuser && \

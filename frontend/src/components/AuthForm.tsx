@@ -4,7 +4,6 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
 import { api, ApiError } from "@/lib/api";
-import { getStoredUser } from "@/lib/auth";
 
 export function AuthForm({ mode }: { mode: "login" | "register" }) {
   const router = useRouter();
@@ -23,8 +22,7 @@ export function AuthForm({ mode }: { mode: "login" | "register" }) {
         await api.register({ email, password, full_name: fullName || undefined });
       }
       await api.login({ email, password });
-      const user = getStoredUser();
-      router.replace(user?.role === "ADMIN" ? "/admin" : "/dashboard");
+      router.replace("/bots");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Something went wrong.");
     } finally {
@@ -33,35 +31,37 @@ export function AuthForm({ mode }: { mode: "login" | "register" }) {
   }
 
   return (
-    <main className="grid min-h-screen place-items-center px-4 py-10">
-      <section className="panel w-full max-w-md p-6">
-        <div className="mb-6">
-          <p className="text-sm font-black uppercase tracking-wide text-[#176b87]">Ardee RAG</p>
-          <h1 className="mt-2 text-3xl font-black text-slate-950">
-            {mode === "login" ? "Sign in" : "Create account"}
+    <main className="auth-shell">
+      <section className="auth-panel">
+        <div className="mb-7">
+          <p className="brand-mark text-2xl text-[var(--foreground)]">
+            Ardee<span className="text-[var(--primary)]">.</span>
+          </p>
+          <h1 className="page-title mt-5">
+            {mode === "login" ? "Welcome back" : "Create your account"}
           </h1>
-          <p className="mt-2 text-sm text-slate-600">
+          <p className="page-lede">
             {mode === "login"
-              ? "Access your RAG chat sessions and admin workspace."
-              : "Register a workspace account to start asking uploaded PDFs."}
+              ? "Sign in to your RAG workspace and pick up where you left off."
+              : "Register to chat with uploaded PDFs — answers grounded in your documents."}
           </p>
         </div>
         <form className="space-y-4" onSubmit={onSubmit}>
           {mode === "register" ? (
-            <label className="block text-sm font-bold text-slate-700">
+            <label className="block text-sm font-semibold text-slate-700">
               Full name
               <input
-                className="input mt-1"
+                className="input mt-1.5"
                 onChange={(event) => setFullName(event.target.value)}
                 value={fullName}
                 autoComplete="name"
               />
             </label>
           ) : null}
-          <label className="block text-sm font-bold text-slate-700">
+          <label className="block text-sm font-semibold text-slate-700">
             Email
             <input
-              className="input mt-1"
+              className="input mt-1.5"
               onChange={(event) => setEmail(event.target.value)}
               required
               type="email"
@@ -69,10 +69,10 @@ export function AuthForm({ mode }: { mode: "login" | "register" }) {
               autoComplete="email"
             />
           </label>
-          <label className="block text-sm font-bold text-slate-700">
+          <label className="block text-sm font-semibold text-slate-700">
             Password
             <input
-              className="input mt-1"
+              className="input mt-1.5"
               minLength={8}
               onChange={(event) => setPassword(event.target.value)}
               required
@@ -87,12 +87,15 @@ export function AuthForm({ mode }: { mode: "login" | "register" }) {
             </div>
           ) : null}
           <button className="btn btn-primary w-full" disabled={loading} type="submit">
-            {loading ? "Working..." : mode === "login" ? "Sign in" : "Register"}
+            {loading ? "Working..." : mode === "login" ? "Sign in" : "Create account"}
           </button>
         </form>
-        <p className="mt-5 text-center text-sm text-slate-600">
+        <p className="mt-6 text-center text-sm text-slate-600">
           {mode === "login" ? "Need an account?" : "Already registered?"}{" "}
-          <Link className="font-bold text-[#176b87]" href={mode === "login" ? "/register" : "/login"}>
+          <Link
+            className="font-semibold text-[var(--primary)] underline-offset-2 hover:underline"
+            href={mode === "login" ? "/register" : "/login"}
+          >
             {mode === "login" ? "Register" : "Sign in"}
           </Link>
         </p>

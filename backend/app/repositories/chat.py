@@ -3,7 +3,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.rag import ChatMessage, ChatMessageRole, ChatSession, TokenUsage
@@ -15,9 +15,20 @@ class ChatRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def create_session(self, *, user_id: uuid.UUID, title: str) -> ChatSession:
-        """Create a chat session for a user."""
-        chat_session = ChatSession(user_id=user_id, title=title, last_message_at=datetime.now(UTC))
+    async def create_session(
+        self,
+        *,
+        user_id: uuid.UUID,
+        title: str,
+        bot_id: uuid.UUID | None = None,
+    ) -> ChatSession:
+        """Create a chat session for a user, scoped to a bot."""
+        chat_session = ChatSession(
+            user_id=user_id,
+            bot_id=bot_id,
+            title=title,
+            last_message_at=datetime.now(UTC),
+        )
         self.session.add(chat_session)
         await self.session.flush()
         await self.session.refresh(chat_session)
@@ -66,20 +77,47 @@ class ChatRepository:
         user_id: uuid.UUID,
         limit: int,
         offset: int,
+        bot_id: uuid.UUID | None = None,
     ) -> list[ChatSession]:
-        """List active sessions owned by a user."""
-        stmt: Select[tuple[ChatSession]] = (
-            select(ChatSession)
-            .where(
-                ChatSession.user_id == user_id,
-                ChatSession.is_archived.is_(False),
+        """List active sessions owned by a user, optionally scoped to a bot."""
+        stmt: Select[tuple[ChatSession]] = select(ChatSession).where(
+            ChatSession.user_id == user_id,
+            ChatSession.is_archived.is_(False),
+        )
+        if bot_id is not None:
+            stmt = stmt.where(ChatSession.bot_id == bot_id)
+        stmt = (
+            stmt.order_by(
+                ChatSession.last_message_at.desc().nullslast(), ChatSession.created_at.desc()
             )
-            .order_by(ChatSession.last_message_at.desc().nullslast(), ChatSession.created_at.desc())
             .limit(limit)
             .offset(offset)
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def sum_tokens_by_session(
+        self,
+        *,
+        session_ids: list[uuid.UUID],
+    ) -> dict[uuid.UUID, int]:
+        """Return total token usage keyed by chat session id."""
+        if not session_ids:
+            return {}
+        stmt = (
+            select(
+                TokenUsage.session_id,
+                func.coalesce(func.sum(TokenUsage.total_tokens), 0).label("total_tokens"),
+            )
+            .where(TokenUsage.session_id.in_(session_ids))
+            .group_by(TokenUsage.session_id)
+        )
+        result = await self.session.execute(stmt)
+        return {
+            row.session_id: int(row.total_tokens)
+            for row in result.all()
+            if row.session_id is not None
+        }
 
     async def list_session_messages(
         self,
@@ -149,11 +187,13 @@ class ChatRepository:
         input_tokens: int,
         output_tokens: int,
         embedding_tokens: int,
+        bot_id: uuid.UUID | None = None,
         request_metadata: dict[str, object] | None = None,
     ) -> TokenUsage:
         """Persist token usage for metrics and cost monitoring."""
         token_usage = TokenUsage(
             user_id=user_id,
+            bot_id=bot_id,
             session_id=session_id,
             message_id=message_id,
             model_name=model_name,
