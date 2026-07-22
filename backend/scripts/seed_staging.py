@@ -38,7 +38,7 @@ from app.models.rag import Bot, ChatSession, RagDocument
 from app.models.user import User, UserRole
 from app.repositories.user import UserRepository
 
-DEFAULT_PASSWORD = "StagingPass123!"
+DEFAULT_PASSWORD = "pass123"
 
 DEFAULT_BOT_NAME = "General Knowledge Assistant"
 DEFAULT_BOT_DESCRIPTION = "Answers questions from the uploaded knowledge base."

@@ -44,6 +44,8 @@ flowchart LR
     API --> FS[[Local disk<br/>PDF storage]]
 ```
 
+> **Current runtime** uses local disk for PDFs and synchronous ingestion inside the upload request. The production target (S3 + presigned upload + queue workers) is under [Scope of improvement](#scope-of-improvement).
+
 The product is organized around **bots**. Each bot has its own system prompt (persona) and PDF knowledge base. Retrieval, chat sessions, semantic cache, and token usage are all **scoped to a bot**, so answers never mix documents across assistants.
 
 The backend is layered: **routes → services → repositories → models**. Cross-cutting concerns (auth, rate limit, request-id, security headers, metrics, logging) live in middleware/core so business logic stays clean and testable.
@@ -173,16 +175,18 @@ The important design choice is that a bot is not just a UI grouping. It is carri
 flowchart LR
     A[Upload PDF<br/>title + bot_id] --> B[Save to disk<br/>+ checksum]
     B --> C[Create DB row<br/>status=PENDING]
-    C --> D[Extract text<br/>pypdf, per page]
+    C --> D[status=PROCESSING<br/>Extract text<br/>pypdf, per page]
     D --> E[Chunk<br/>LlamaIndex SentenceSplitter<br/>512 tokens / 50 overlap]
     E --> F[Embed batches<br/>OpenAI 1536-dim]
     F --> G[Store chunks in pgvector<br/>status=READY]
     G -.trigger.-> H[search_vector tsvector<br/>auto-populated]
+    D -.on error.-> X[status=FAILED]
 ```
 
 - A DB trigger keeps each chunk's full-text `search_vector` in sync, so keyword search needs no extra ingestion code.
 - Upload paths: `POST /bots/{bot_id}/documents` or `POST /rag/documents` (requires `bot_id` form field).
 - **Replace** re-runs the pipeline, bumps the document `version`, and clears that bot's semantic cache; **delete** is a soft delete plus physical file removal and also clears that bot's cache.
+- **Roadmap:** Same extract → chunk → embed → index steps move to **async workers** reading from a queue after a **presigned S3** upload — see [Asynchronous ingestion](#2-asynchronous-ingestion-with-a-queue--workers).
 
 ### 9. Vector database (pgvector)
 
@@ -325,7 +329,7 @@ sequenceDiagram
     API-->>A: 201 document (blocks until fully indexed)
 ```
 
-> The upload request **blocks** until extraction, embedding, and indexing finish. See [Scope of improvement](#scope-of-improvement) for the async version.
+> The upload request **blocks** until extraction, embedding, and indexing finish. Target flow (presigned S3 + queue workers) is below under [Scope of improvement](#2-asynchronous-ingestion-with-a-queue--workers).
 
 ---
 
@@ -381,38 +385,68 @@ Code defaults from `Settings` (environment variables override; see `.env.example
 
 **Today:** PDFs live on the app's local filesystem, so storage isn't durable, isn't shared across instances, and grows the container/host.
 
-**Target:** Upload PDFs to **Amazon S3** (or any S3-compatible store). Postgres keeps only the object key + metadata; downloads/re-processing stream from S3.
+**Target:** Store PDFs in **Amazon S3** (or S3-compatible). Postgres keeps only the object key + metadata. Uploads use a **presigned PUT URL** so the browser writes directly to S3; workers and replace/re-process flows **GetObject** from S3. Soft-delete removes (or lifecycle-expires) the object instead of unlinking a local path.
 
-**Benefits:** durability, unlimited capacity, shared across every app instance, lifecycle policies, and optional CDN.
+**Benefits:** durability, unlimited capacity, shared across every app instance, no large file bodies on the API, lifecycle policies, and optional CDN for downloads.
+
+> Implemented together with [async ingestion](#2-asynchronous-ingestion-with-a-queue--workers) below — storage alone does not fix the blocking upload request.
 
 ### 2. Asynchronous ingestion with a queue + workers
 
-**Today:** Upload is **synchronous** — the admin waits while the file is extracted, chunked, embedded, and indexed. Large PDFs make the request slow, tie up a web worker, and a transient OpenAI error fails the whole upload with no retry.
+**Today:** Upload is **synchronous** — the admin waits while the file is extracted, chunked, embedded, and indexed. Large PDFs make the request slow, tie up an API worker, and a transient OpenAI error fails the whole upload with no retry.
 
-**Target:** Decouple upload from processing.
+**Target:** Presigned S3 upload + decoupled processing (workers pull jobs; same extract → chunk → embed → index pipeline as today).
 
 ```mermaid
-flowchart LR
-    A[Admin uploads PDF] --> S3[(S3 object)]
-    A --> DB[(Document row<br/>status=PENDING)]
-    A --> Q[[Queue<br/>SQS / Redis / RabbitMQ]]
-    A -->|202 Accepted| A2[Fast response]
-    Q --> W1[Worker 1]
-    Q --> W2[Worker 2]
-    Q --> Wn[Worker N]
-    W1 --> P[Extract → chunk → embed → index]
-    P --> DB2[(status=READY<br/>or FAILED + retry)]
+flowchart TB
+    subgraph Client["Client"]
+        UI[Admin UI]
+    end
+
+    subgraph API["API tier"]
+        BE[Backend API]
+    end
+
+    subgraph Data["Data plane"]
+        PG[(PostgreSQL)]
+        S3[(Amazon S3)]
+        OA[OpenAI embeddings]
+    end
+
+    subgraph Async["Async ingestion"]
+        Q[[Job queue<br/>SQS / Redis / RabbitMQ]]
+        W[Worker pool<br/>Celery / RQ / Arq / Dramatiq]
+        P[Extract → chunk → embed → index]
+        DLQ[[Dead-letter queue]]
+    end
+
+    UI -->|1. Request upload<br/>filename, size, checksum, bot_id| BE
+    BE -->|2. Insert document<br/>status=PENDING, object key| PG
+    BE -->|3. Return presigned PUT URL<br/>+ document_id| UI
+    UI -->|4. PUT PDF bytes<br/>direct to S3| S3
+    UI -->|5. Confirm upload complete| BE
+    BE -->|6. Enqueue ingest job| Q
+    BE -->|7. 202 Accepted<br/>document still PENDING| UI
+    W -.->|8. Pull / long-poll jobs| Q
+    W -->|9. status=PROCESSING<br/>GetObject by key| S3
+    W --> P
+    P -->|10. Embed batches| OA
+    P -->|11. Persist chunks + embeddings<br/>status=READY or FAILED<br/>clear bot semantic cache on replace| PG
+    Q -.->|12. Retries exhausted| DLQ
+    UI -.->|13. Poll GET /documents/:id<br/>until READY / FAILED| BE
+    BE -.->|read status| PG
 ```
 
-**How:** On upload, store the file in S3, create a `PENDING` row, enqueue a job, and return **`202 Accepted` immediately**. Workers (e.g. Celery / RQ / Arq / Dramatiq) run extract → chunk → embed → index and update status to `READY` or `FAILED`.
+**How:** The UI asks the API for a **presigned S3 PUT URL**. The API creates a `PENDING` document row (object key + metadata only—no file bytes through the web tier), returns the URL, and the browser uploads **directly to S3**. On confirm, the API enqueues an ingest job and responds **`202 Accepted`**. Workers **pull** jobs from the queue, mark the document `PROCESSING`, stream the object from S3, run extract → chunk → embed (OpenAI) → index, and update the **same** Postgres row to `READY` or `FAILED` (with backoff retries; exhausted jobs land in a DLQ). Replace still bumps `version` and clears that bot's semantic cache. The UI polls document status until processing finishes.
 
-**Benefits:** instant upload response; retries with backoff; independent scaling of ingestion vs the web tier.
+**Benefits:** no large payloads on the API; durable shared storage; instant upload ACK; horizontal worker scale independent of the web tier; retries + DLQ for poison messages.
 
 ### 3. Other roadmap items
 
+- **Ingest hardening:** S3 bucket CORS for browser PUT; presigned URL TTL + content-type/size constraints; optional checksum verify on confirm; `PROCESSING` status while a worker holds the job.
 - **Retrieval quality:** cross-encoder **re-ranker** over hybrid candidates; optionally true **BM25** via ParadeDB `pg_search`; tune HNSW `ef_search`.
 - **Model flexibility:** provider-agnostic embedding/LLM layer (Azure OpenAI, Bedrock, local models) via configuration.
-- **Observability:** ship structured logs to a store, add OpenTelemetry tracing, Grafana dashboards over Prometheus metrics.
+- **Observability:** ship structured logs to a store, add OpenTelemetry tracing (propagate `X-Request-ID` into workers), Grafana dashboards over Prometheus metrics.
 - **Delivery:** CI/CD (lint, type-check, tests, image build/scan), automated migrations, blue-green/canary deploys.
 - **Security/ops:** secret manager + rotation, TLS at the edge, managed Postgres/Redis, backup & restore runbooks.
 - **Scale/UX:** WebSocket transport option, citation click-through to the source page, soft-delete/restore UI for documents.
